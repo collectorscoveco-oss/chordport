@@ -1,5 +1,10 @@
 using System;
+using System.Diagnostics;
 using System.IO;
+using System.Net;
+using System.Net.Sockets;
+using System.Text.RegularExpressions;
+using System.Threading;
 using ChordPort.Api.Services;
 
 namespace ChordPort.Api.Tests;
@@ -46,7 +51,7 @@ public sealed class PortableDistributionContractTests
     }
 
     [Fact]
-    public void Windows_launcher_routes_nonzero_port_preflight_results_to_refusal_or_failure_before_starting()
+    public void Windows_launcher_uses_unambiguous_port_preflight_codes_and_fails_closed_before_starting()
     {
         var launcher = File.ReadAllText(Path.Combine(FindRepositoryRoot(), "scripts", "Start-ChordPort.cmd"));
         var preflight = GetBlockBeforeFirstLabel(launcher);
@@ -57,10 +62,14 @@ public sealed class PortableDistributionContractTests
         Assert.Contains("System.Net.Sockets.TcpClient", preflight, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("Connect('127.0.0.1', 5098)", preflight, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("Connect('0.0.0.0'", preflight, StringComparison.OrdinalIgnoreCase);
-        Assert.Contains(
-            "powershell.exe -NoLogo -NoProfile -NonInteractive -Command \"$client = $null; try { $client = [System.Net.Sockets.TcpClient]::new(); $client.Connect('127.0.0.1', 5098); exit 0 } catch [System.Net.Sockets.SocketException] { if ($_.Exception.SocketErrorCode -eq [System.Net.Sockets.SocketError]::ConnectionRefused) { exit 1 }; exit 2 } catch { exit 2 } finally { if ($null -ne $client) { $client.Dispose() } } }\"\nif errorlevel 2 goto :port_preflight_failed\nif errorlevel 1 goto :port_in_use\ngoto :port_available",
-            NormalizeLineEndings(preflight),
-            StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("exit 10", preflight, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("ConnectionRefused) { exit 0 }", preflight, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("catch { exit 20 }", preflight, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("finally { if ($null -ne $client) { $client.Dispose() } }\"", preflight, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("if errorlevel 20 goto :port_preflight_failed", preflight, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("if errorlevel 10 goto :port_in_use", preflight, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("if errorlevel 1 goto :port_preflight_failed", preflight, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("goto :port_available", preflight, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("A local service is already listening at %URL%", portInUse, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("Close it, then retry", portInUse, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("goto :startup_failed", portInUse, StringComparison.OrdinalIgnoreCase);
@@ -70,13 +79,30 @@ public sealed class PortableDistributionContractTests
         Assert.Contains("start \"ChordPort\" /b", portAvailable, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("start \"\" \"%URL%\"", portAvailable, StringComparison.OrdinalIgnoreCase);
 
-        foreach (var nonzeroExitCode in new[] { 1, 2 })
+        foreach (var blockedExitCode in new[] { 1, 10, 20 })
         {
-            Assert.False(PreflightCanReach(launcher, nonzeroExitCode, "start \"ChordPort\" /b"),
-                $"Preflight exit {nonzeroExitCode} must not start the app.");
-            Assert.False(PreflightCanReach(launcher, nonzeroExitCode, "start \"\" \"%URL%\""),
-                $"Preflight exit {nonzeroExitCode} must not open a browser.");
+            Assert.False(PreflightCanReach(launcher, blockedExitCode, "start \"ChordPort\" /b"),
+                $"Preflight exit {blockedExitCode} must not start the app.");
+            Assert.False(PreflightCanReach(launcher, blockedExitCode, "start \"\" \"%URL%\""),
+                $"Preflight exit {blockedExitCode} must not open a browser.");
         }
+
+        Assert.True(PreflightCanReach(launcher, 0, "start \"ChordPort\" /b"),
+            "Only a connection-refused (available-port) result may start the app.");
+    }
+
+    [Fact]
+    public void Windows_launcher_probe_runs_in_native_Windows_PowerShell_when_available()
+    {
+        if (!CanRunWindowsPowerShell()) return;
+
+        var probe = ExtractPowerShellProbe(File.ReadAllText(Path.Combine(FindRepositoryRoot(), "scripts", "Start-ChordPort.cmd")));
+        using var listener = new TcpListener(IPAddress.Loopback, 5098);
+        listener.Start();
+        Assert.Equal(10, RunWindowsPowerShell(probe));
+
+        listener.Stop();
+        Assert.Equal(0, WaitForWindowsPowerShellExitCode(probe, expectedExitCode: 0));
     }
 
     [Fact]
@@ -181,6 +207,69 @@ public sealed class PortableDistributionContractTests
 
         var bodyStart = labelMatch.Index + labelMatch.Length;
         return bodyStart < launcher.Length && launcher[bodyStart] == '\n' ? bodyStart + 1 : bodyStart;
+    }
+
+    private static bool CanRunWindowsPowerShell()
+    {
+        try
+        {
+            using var process = Process.Start(new ProcessStartInfo
+            {
+                FileName = "powershell.exe",
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                ArgumentList = { "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", "exit 0" }
+            });
+            process?.WaitForExit(5000);
+            return process is { ExitCode: 0 };
+        }
+        catch (System.ComponentModel.Win32Exception)
+        {
+            return false;
+        }
+    }
+
+    private static string ExtractPowerShellProbe(string launcher)
+    {
+        var match = Regex.Match(
+            launcher,
+            "powershell\\.exe -NoLogo -NoProfile -NonInteractive -Command \\\"(?<probe>.*?)\\\"",
+            RegexOptions.IgnoreCase);
+        if (!match.Success) throw new InvalidDataException("The launcher is missing its PowerShell TCP preflight probe.");
+
+        return match.Groups["probe"].Value;
+    }
+
+    private static int WaitForWindowsPowerShellExitCode(string script, int expectedExitCode)
+    {
+        var exitCode = RunWindowsPowerShell(script);
+        for (var attempt = 0; attempt < 10 && exitCode != expectedExitCode; attempt++)
+        {
+            Thread.Sleep(TimeSpan.FromMilliseconds(250));
+            exitCode = RunWindowsPowerShell(script);
+        }
+
+        return exitCode;
+    }
+
+    private static int RunWindowsPowerShell(string script)
+    {
+        using var process = Process.Start(new ProcessStartInfo
+        {
+            FileName = "powershell.exe",
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardError = true,
+            RedirectStandardOutput = true,
+            ArgumentList = { "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script }
+        }) ?? throw new InvalidOperationException("Could not start Windows PowerShell.");
+        var standardError = process.StandardError.ReadToEnd();
+        var standardOutput = process.StandardOutput.ReadToEnd();
+        process.WaitForExit(15000);
+        if (!process.HasExited) throw new TimeoutException("Windows PowerShell did not finish the TCP preflight probe.");
+        Assert.True(string.IsNullOrWhiteSpace(standardError), $"Windows PowerShell probe wrote stderr: {standardError}");
+        Assert.True(string.IsNullOrWhiteSpace(standardOutput), $"Windows PowerShell probe wrote stdout: {standardOutput}");
+        return process.ExitCode;
     }
 
     private static string NormalizeLineEndings(string value) => value.Replace("\r\n", "\n");

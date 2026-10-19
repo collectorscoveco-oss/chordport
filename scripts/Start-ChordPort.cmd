@@ -13,9 +13,10 @@ if not exist "%DIST_DIR%ChordPort.Api.exe" (
   goto :startup_failed
 )
 
-powershell.exe -NoLogo -NoProfile -NonInteractive -Command "$client = $null; try { $client = [System.Net.Sockets.TcpClient]::new(); $client.Connect('127.0.0.1', 5098); exit 0 } catch [System.Net.Sockets.SocketException] { if ($_.Exception.SocketErrorCode -eq [System.Net.Sockets.SocketError]::ConnectionRefused) { exit 1 }; exit 2 } catch { exit 2 } finally { if ($null -ne $client) { $client.Dispose() } } }"
-if errorlevel 2 goto :port_preflight_failed
-if errorlevel 1 goto :port_in_use
+powershell.exe -NoLogo -NoProfile -NonInteractive -Command "$client = $null; try { $client = [System.Net.Sockets.TcpClient]::new(); $client.Connect('127.0.0.1', 5098); exit 10 } catch [System.Net.Sockets.SocketException] { if ($_.Exception.SocketErrorCode -eq [System.Net.Sockets.SocketError]::ConnectionRefused) { exit 0 }; exit 20 } catch { exit 20 } finally { if ($null -ne $client) { $client.Dispose() } }"
+if errorlevel 20 goto :port_preflight_failed
+if errorlevel 10 goto :port_in_use
+if errorlevel 1 goto :port_preflight_failed
 goto :port_available
 
 :port_in_use

@@ -35,11 +35,11 @@ builder.Services.AddHttpClient<IMusicMetadataProvider, MusicBrainzClient>((sp, c
 builder.Services.AddSingleton<SabnzbdSecretProtector>();
 builder.Services.AddHttpClient<SabnzbdClient>(client => client.Timeout = TimeSpan.FromSeconds(5)).RemoveAllLoggers();
 builder.Services.AddSingleton<IndexerSecretProtector>();
-builder.Services.AddHttpClient<IndexerClient>(client => { client.Timeout = TimeSpan.FromSeconds(5); client.DefaultRequestHeaders.UserAgent.ParseAdd("ChordPort/0.1.2 (local indexer capability test)"); }).ConfigurePrimaryHttpMessageHandler(IndexerHttpHandlerFactory.Create).RemoveAllLoggers();
-builder.Services.AddSingleton(new UpdateCheckOptions { CurrentVersion = "0.1.2" });
+builder.Services.AddHttpClient<IndexerClient>(client => { client.Timeout = TimeSpan.FromSeconds(5); client.DefaultRequestHeaders.UserAgent.ParseAdd("ChordPort/0.1.3 (local indexer capability test)"); }).ConfigurePrimaryHttpMessageHandler(IndexerHttpHandlerFactory.Create).RemoveAllLoggers();
+builder.Services.AddSingleton(new UpdateCheckOptions { CurrentVersion = "0.1.3" });
 builder.Services.AddHttpClient<UpdateCheckClient>(client =>
 {
-    client.DefaultRequestHeaders.UserAgent.ParseAdd("ChordPort/0.1.2 (local update check)");
+    client.DefaultRequestHeaders.UserAgent.ParseAdd("ChordPort/0.1.3 (local update check)");
     client.Timeout = TimeSpan.FromSeconds(5);
 });
 builder.Services.AddSingleton<HealthService>();
