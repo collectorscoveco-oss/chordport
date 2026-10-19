@@ -4,7 +4,7 @@ import path from 'node:path';
 
 const frontendRoot = path.resolve(import.meta.dirname, '..');
 const textAssetPattern = /\.(?:css|html|js|jsx|mjs|ts|tsx)$/i;
-const externalResourcePatterns = [
+const externalBuildResourcePatterns = [
   /@import\s+(?:url\(\s*)?['"]?(https?:\/\/[^\s'"`<>)}]+)/gi,
   /url\(\s*['"]?(https?:\/\/[^\s'"`<>)}]+)/gi,
   /<(?:audio|embed|iframe|img|link|object|script|source|track|video)\b[^>]*?\b(?:data|href|poster|src)\s*=\s*['"](https?:\/\/[^\s'"`<>)}]+)/gi,
@@ -13,7 +13,11 @@ const externalResourcePatterns = [
 ];
 
 export function findExternalResourceUrls(content) {
-  return externalResourcePatterns.flatMap(pattern => [...content.matchAll(pattern)].map(match => match[1]));
+  return [...content.matchAll(/https?:\/\/[^\s'"`<>)}]+/gi)].map(match => match[0]);
+}
+
+function findExternalBuildResourceUrls(content) {
+  return externalBuildResourcePatterns.flatMap(pattern => [...content.matchAll(pattern)].map(match => match[1]));
 }
 
 async function pathExists(target) {
@@ -43,12 +47,15 @@ async function verifyLocalAssets(requireBuild) {
     throw new Error('Production build assets are required; run npm run build first.');
   }
 
-  const assets = [...sourceAssets];
-  if (await pathExists(buildDirectory)) assets.push(...await collectTextAssets(buildDirectory));
-
   const findings = [];
-  for (const asset of assets) {
+  for (const asset of sourceAssets) {
     const urls = findExternalResourceUrls(await readFile(asset, 'utf8'));
+    findings.push(...urls.map(url => `${path.relative(frontendRoot, asset)}: ${url}`));
+  }
+
+  const buildAssets = await pathExists(buildDirectory) ? await collectTextAssets(buildDirectory) : [];
+  for (const asset of buildAssets) {
+    const urls = findExternalBuildResourceUrls(await readFile(asset, 'utf8'));
     findings.push(...urls.map(url => `${path.relative(frontendRoot, asset)}: ${url}`));
   }
 
@@ -56,7 +63,7 @@ async function verifyLocalAssets(requireBuild) {
     throw new Error(`External HTTP(S) resource URLs are not allowed:\n${findings.join('\n')}`);
   }
 
-  console.log(`Verified ${assets.length} frontend source/build assets contain no external HTTP(S) resource URLs.`);
+  console.log(`Verified ${sourceAssets.length} frontend source and ${buildAssets.length} build assets contain no external HTTP(S) resource URLs.`);
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
