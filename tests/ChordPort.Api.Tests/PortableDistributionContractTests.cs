@@ -92,6 +92,47 @@ public sealed class PortableDistributionContractTests
     }
 
     [Fact]
+    public void Windows_launcher_starts_the_singleton_tray_only_after_a_healthy_api()
+    {
+        var launcher = File.ReadAllText(Path.Combine(FindRepositoryRoot(), "scripts", "Start-ChordPort.cmd"));
+        var ready = GetLabelBlock(launcher, "ready");
+        var failed = GetLabelBlock(launcher, "startup_failed");
+
+        Assert.Contains("%TRAY_DIR%ChordPort.Tray.exe", ready, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("start \"ChordPort Tray\" /b", ready, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("start \"ChordPort Tray\" /b", GetBlockBeforeFirstLabel(launcher), StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("ChordPort.Tray.exe", failed, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Windows_tray_contract_uses_local_identity_checked_shutdown_and_disposes_when_the_api_stops()
+    {
+        var tray = File.ReadAllText(Path.Combine(FindRepositoryRoot(), "src", "ChordPort.Tray", "Program.cs"));
+
+        Assert.Contains("Local\\\\ChordPort.Tray", tray, StringComparison.Ordinal);
+        Assert.Contains("Mutex", tray, StringComparison.Ordinal);
+        Assert.Contains("Open ChordPort", tray, StringComparison.Ordinal);
+        Assert.Contains("Exit ChordPort", tray, StringComparison.Ordinal);
+        Assert.Contains("/api/system/shutdown", tray, StringComparison.Ordinal);
+        Assert.Contains("/api/health", tray, StringComparison.Ordinal);
+        Assert.Contains("\"ChordPort\"", tray, StringComparison.Ordinal);
+        Assert.Contains("Application.Exit", tray, StringComparison.Ordinal);
+        Assert.Contains("_icon.Dispose()", tray, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Windows_packaging_script_includes_the_self_contained_tray_helper()
+    {
+        var script = File.ReadAllText(Path.Combine(FindRepositoryRoot(), "scripts", "package-windows.ps1"));
+
+        Assert.Contains("ChordPort.Tray", script, StringComparison.Ordinal);
+        Assert.Contains("ChordPort.Tray.exe", script, StringComparison.Ordinal);
+        Assert.Contains("$trayDirectory", script, StringComparison.Ordinal);
+        Assert.Contains("Join-Path $publishDirectory \"tray\"", script, StringComparison.Ordinal);
+        Assert.Contains("--self-contained true", script, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Windows_launcher_probe_runs_in_native_Windows_PowerShell_when_available()
     {
         if (!OperatingSystem.IsWindows() || !CanRunWindowsPowerShell()) return;

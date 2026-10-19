@@ -35,14 +35,15 @@ builder.Services.AddHttpClient<IMusicMetadataProvider, MusicBrainzClient>((sp, c
 builder.Services.AddSingleton<SabnzbdSecretProtector>();
 builder.Services.AddHttpClient<SabnzbdClient>(client => client.Timeout = TimeSpan.FromSeconds(5)).RemoveAllLoggers();
 builder.Services.AddSingleton<IndexerSecretProtector>();
-builder.Services.AddHttpClient<IndexerClient>(client => { client.Timeout = TimeSpan.FromSeconds(5); client.DefaultRequestHeaders.UserAgent.ParseAdd("ChordPort/0.1.4 (local indexer capability test)"); }).ConfigurePrimaryHttpMessageHandler(IndexerHttpHandlerFactory.Create).RemoveAllLoggers();
-builder.Services.AddSingleton(new UpdateCheckOptions { CurrentVersion = "0.1.4" });
+builder.Services.AddHttpClient<IndexerClient>(client => { client.Timeout = TimeSpan.FromSeconds(5); client.DefaultRequestHeaders.UserAgent.ParseAdd("ChordPort/0.1.5 (local indexer capability test)"); }).ConfigurePrimaryHttpMessageHandler(IndexerHttpHandlerFactory.Create).RemoveAllLoggers();
+builder.Services.AddSingleton(new UpdateCheckOptions { CurrentVersion = "0.1.5" });
 builder.Services.AddHttpClient<UpdateCheckClient>(client =>
 {
-    client.DefaultRequestHeaders.UserAgent.ParseAdd("ChordPort/0.1.4 (local update check)");
+    client.DefaultRequestHeaders.UserAgent.ParseAdd("ChordPort/0.1.5 (local update check)");
     client.Timeout = TimeSpan.FromSeconds(5);
 });
 builder.Services.AddSingleton<HealthService>();
+builder.Services.AddSingleton<ShutdownService>();
 var app = builder.Build();
 using (var scope = app.Services.CreateScope())
 {
@@ -57,6 +58,11 @@ using (var scope = app.Services.CreateScope())
 }
 
 app.MapGet("/api/health", (HealthService health) => Results.Ok(health.Get()));
+app.MapPost("/api/system/shutdown", (HttpContext context, ShutdownService shutdown) =>
+{
+    if (!LoopbackRequestPolicy.IsLoopback(context.Connection.RemoteIpAddress)) return Results.StatusCode(StatusCodes.Status403Forbidden);
+    return Results.Ok(shutdown.RequestStop());
+});
 app.MapGet("/api/search", async (string? mode, string? q, string? provider, ICatalogAdapter catalog, IMusicMetadataProvider musicBrainz, CancellationToken cancellationToken) =>
 {
     if (!Enum.TryParse<SearchMode>(mode, true, out var parsed)) return Results.BadRequest(new { error = "mode must be Songs, Artists, or Albums." });

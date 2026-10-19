@@ -2,6 +2,7 @@
 setlocal EnableExtensions
 
 set "DIST_DIR=%~dp0"
+set "TRAY_DIR=%DIST_DIR%tray\"
 set "URL=http://127.0.0.1:5098"
 set "CHORDPORT_DATA_DIR=%LOCALAPPDATA%\ChordPort"
 set "ASPNETCORE_URLS=%URL%"
@@ -10,6 +11,10 @@ cd /d "%DIST_DIR%" || goto :startup_failed
 
 if not exist "%DIST_DIR%ChordPort.Api.exe" (
   echo ChordPort executable was not found in "%DIST_DIR%".
+  goto :startup_failed
+)
+if not exist "%TRAY_DIR%ChordPort.Tray.exe" (
+  echo ChordPort tray controller was not found in "%TRAY_DIR%".
   goto :startup_failed
 )
 
@@ -38,7 +43,7 @@ echo Waiting for the local health check...
 start "ChordPort" /b "%DIST_DIR%ChordPort.Api.exe" --urls "%URL%"
 
 for /l %%I in (1,1,30) do (
-  powershell -NoProfile -Command "try { $response = Invoke-WebRequest -UseBasicParsing -Uri '%URL%/api/health' -TimeoutSec 1; if ($response.StatusCode -eq 200) { exit 0 }; exit 1 } catch { exit 1 }"
+  powershell.exe -NoLogo -NoProfile -NonInteractive -Command "try { $response = Invoke-WebRequest -UseBasicParsing -Uri '%URL%/api/health' -TimeoutSec 1; if ($response.StatusCode -eq 200) { exit 0 }; exit 1 } catch { exit 1 }"
   if not errorlevel 1 goto :ready
   timeout /t 1 /nobreak >nul
 )
@@ -48,7 +53,9 @@ echo Check the messages above, then press a key to close this window.
 goto :startup_failed
 
 :ready
-echo ChordPort is ready. Opening your browser...
+echo ChordPort is ready. Starting the tray controller...
+start "ChordPort Tray" /b "%TRAY_DIR%ChordPort.Tray.exe"
+echo Opening your browser...
 start "" "%URL%"
 exit /b 0
 
