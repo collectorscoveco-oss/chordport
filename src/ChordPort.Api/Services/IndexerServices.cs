@@ -66,40 +66,74 @@ public static class IndexerAddressPolicy
         return address.AddressFamily == System.Net.Sockets.AddressFamily.InterNetworkV6 && (bytes[0] & 0xfe) == 0xfc;
     }
 
-    // HTTPS targets must be globally routable. Deny special-use space rather than attempting to maintain an allow-list of public networks.
+    // Policy v2 (2026-10): only globally-routable unicast targets may receive HTTPS
+    // requests. The positive gates below reject unclassified address space by default;
+    // the named exclusions are the IANA special-purpose ranges inside those gates.
+    // This same method is used for URL literals and every DNS candidate before connect.
     public static bool IsPublicHttpsAddress(IPAddress address)
     {
         address = Normalize(address);
         var bytes = address.GetAddressBytes();
-        if (address.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork)
-            return !IsSpecialIpv4(bytes);
-        if (address.AddressFamily != System.Net.Sockets.AddressFamily.InterNetworkV6) return false;
-        return !IsSpecialIpv6(address, bytes);
+        return address.AddressFamily switch
+        {
+            System.Net.Sockets.AddressFamily.InterNetwork => IsGlobalIpv4(bytes),
+            System.Net.Sockets.AddressFamily.InterNetworkV6 => IsGlobalIpv6(bytes),
+            _ => false
+        };
     }
 
-    private static IPAddress Normalize(IPAddress address) => address.IsIPv4MappedToIPv6 ? address.MapToIPv4() : address;
+    private static IPAddress Normalize(IPAddress address)
+    {
+        if (address.IsIPv4MappedToIPv6) return address.MapToIPv4();
+        var bytes = address.GetAddressBytes();
+        // ::/96 is the obsolete IPv4-compatible encoding. Treat it as its IPv4
+        // destination rather than allowing it to bypass the IPv4 policy.
+        return address.AddressFamily == System.Net.Sockets.AddressFamily.InterNetworkV6 && IsPrefix(bytes, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+            ? new IPAddress(bytes.AsSpan(12, 4))
+            : address;
+    }
 
-    private static bool IsSpecialIpv4(byte[] bytes) =>
-        bytes[0] == 0 || bytes[0] == 10 || bytes[0] == 127 || bytes[0] >= 224 ||
-        (bytes[0] == 100 && bytes[1] is >= 64 and <= 127) ||
-        (bytes[0] == 169 && bytes[1] == 254) ||
-        (bytes[0] == 172 && bytes[1] is >= 16 and <= 31) ||
-        (bytes[0] == 192 && (bytes[1] == 0 || bytes[1] == 168 || (bytes[1] == 88 && bytes[2] == 99) || (bytes[1] == 0 && bytes[2] == 2))) ||
-        (bytes[0] == 198 && (bytes[1] is 18 or 19 || (bytes[1] == 51 && bytes[2] == 100))) ||
-        (bytes[0] == 203 && bytes[1] == 0 && bytes[2] == 113);
+    private static bool IsGlobalIpv4(byte[] bytes)
+    {
+        // Positive public-unicast gate, then the IANA IPv4 Special-Purpose Address
+        // Registry allocations within it. 192.0.0.9 and .10 are the documented
+        // globally-reachable exceptions to the otherwise special 192.0.0.0/24.
+        if (bytes[0] is 0 or 10 or 127 || bytes[0] >= 224) return false;
+        if (bytes[0] == 100 && bytes[1] is >= 64 and <= 127) return false;
+        if (bytes[0] == 169 && bytes[1] == 254) return false;
+        if (bytes[0] == 172 && bytes[1] is >= 16 and <= 31) return false;
+        if (bytes[0] == 192 && bytes[1] == 0)
+            return bytes[2] == 0 && bytes[3] is 9 or 10;
+        if (bytes[0] == 192 && bytes[1] == 31 && bytes[2] == 196) return false; // AS112
+        if (bytes[0] == 192 && bytes[1] == 52 && bytes[2] == 193) return false; // AMT
+        if (bytes[0] == 192 && bytes[1] == 88 && bytes[2] == 99) return false; // deprecated 6to4 relay
+        if (bytes[0] == 192 && bytes[1] == 168) return false;
+        if (bytes[0] == 192 && bytes[1] == 175 && bytes[2] == 48) return false; // AS112
+        if (bytes[0] == 198 && bytes[1] is 18 or 19) return false;
+        if (bytes[0] == 198 && bytes[1] == 51 && bytes[2] == 100) return false;
+        return !(bytes[0] == 203 && bytes[1] == 0 && bytes[2] == 113);
+    }
 
-    private static bool IsSpecialIpv6(IPAddress address, byte[] bytes) =>
-        address.Equals(IPAddress.IPv6None) || address.Equals(IPAddress.IPv6Loopback) ||
-        bytes[0] == 0xff || // multicast
-        (bytes[0] == 0xfe && (bytes[1] & 0xc0) == 0x80) || // link-local
-        (bytes[0] & 0xfe) == 0xfc || // unique-local
-        (bytes[0] == 0xfe && (bytes[1] & 0xc0) == 0xc0) || // deprecated site-local
-        IsPrefix(bytes, 0x20, 0x01, 0x0d, 0xb8) || // documentation
-        IsPrefix(bytes, 0x20, 0x01, 0x00, 0x02) || // benchmarking
-        IsPrefix(bytes, 0x00, 0x64, 0xff, 0x9b) || // NAT64 well-known prefix
-        IsPrefix(bytes, 0x01, 0x00, 0x00, 0x00) || // discard-only 100::/64
-        IsPrefix(bytes, 0x20, 0x02) || // 6to4 can encode a non-public IPv4 destination
-        IsPrefix(bytes, 0x20, 0x01, 0x00); // IETF special-purpose 2001:0::/24
+    private static bool IsGlobalIpv6(byte[] bytes)
+    {
+        // Global IPv6 unicast is 2000::/3. Everything else includes unspecified,
+        // loopback, compatible/mapped, NAT64, ULA, link/site-local, and multicast.
+        if ((bytes[0] & 0xe0) != 0x20) return false;
+
+        // IANA Special-Purpose Address Registry entries that sit in 2000::/3.
+        return !IsIetfProtocolAssignments(bytes) && // 2001::/23 IETF protocol assignments
+               !IsPrefix(bytes, 0x20, 0x02) && // 6to4
+               !IsPrefix(bytes, 0x20, 0x01, 0x0d, 0xb8) && // documentation
+               !IsPrefix(bytes, 0x26, 0x20, 0x00, 0x4f, 0x80, 0x00) && // AS112 direct delegation
+               !IsPrefix(bytes, 0x3f, 0xfe) && // deprecated 6bone
+               !IsDocumentationPrefix(bytes); // 3fff::/20
+    }
+
+    private static bool IsIetfProtocolAssignments(byte[] bytes) =>
+        bytes[0] == 0x20 && bytes[1] == 0x01 && (bytes[2] & 0xfe) == 0;
+
+    private static bool IsDocumentationPrefix(byte[] bytes) =>
+        bytes[0] == 0x3f && bytes[1] == 0xff && (bytes[2] & 0xf0) == 0;
 
     private static bool IsPrefix(byte[] bytes, params byte[] prefix) => bytes.AsSpan().StartsWith(prefix);
 }
