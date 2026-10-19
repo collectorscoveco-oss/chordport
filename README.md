@@ -26,7 +26,7 @@ In **Settings → Indexers**, add multiple Newznab or Torznab endpoints with a l
 
 Indexer configuration is per-app: ChordPort does not read or copy Radarr, Sonarr, Prowlarr, or other Arr settings. API keys are protected at rest with ASP.NET Core Data Protection, never returned by list/edit APIs or shown in the UI, and HTTP-client request logging is disabled for key-bearing capability tests. A blank API-key edit retains the saved key; **Clear saved key** removes it. Deleting an indexer removes its protected key with the record.
 
-Use a root/base URL only—no userinfo, path, query, or fragment. Remote indexers must use HTTPS. HTTP is permitted only for `localhost`, loopback, RFC1918, or IPv6 unique-local test endpoints. Redirects are disabled and tests use a short timeout and bounded response handling.
+Use a root/base URL only—no userinfo, path, query, or fragment. Remote indexers must use HTTPS. HTTP is permitted only for `localhost`, loopback, RFC1918, or IPv6 unique-local test endpoints. HTTPS IP literals are accepted only when globally routable; special-use, private, loopback, link-local, multicast, documentation, and reserved addresses are rejected. For HTTPS hostnames, the connection proceeds only if every address resolved for that connection passes the same public-address policy, which also prevents DNS rebinding from selecting a local address. Redirects are disabled and tests use a short timeout and bounded response handling.
 
 ## Update checks
 

@@ -26,6 +26,48 @@ public sealed class IndexerTests
         Assert.Equal(allowed, IndexerEndpointValidator.Validate(raw).IsValid);
     }
 
+    [Theory]
+    [InlineData("https://8.8.8.8", true)]
+    [InlineData("https://[::ffff:127.0.0.1]", false)]
+    [InlineData("https://[::]", false)]
+    [InlineData("https://[fe80::1]", false)]
+    [InlineData("https://169.254.169.254", false)]
+    [InlineData("https://10.0.0.1", false)]
+    [InlineData("https://100.64.0.1", false)]
+    [InlineData("https://192.0.2.1", false)]
+    [InlineData("https://198.18.0.1", false)]
+    [InlineData("https://224.0.0.1", false)]
+    [InlineData("https://[fc00::1]", false)]
+    [InlineData("https://[fec0::1]", false)]
+    [InlineData("https://[ff02::1]", false)]
+    [InlineData("https://[2001:db8::1]", false)]
+    public void Endpoint_policy_rejects_non_public_https_ip_literals(string raw, bool allowed)
+    {
+        Assert.Equal(allowed, IndexerEndpointValidator.Validate(raw).IsValid);
+    }
+
+    [Theory]
+    [InlineData("127.0.0.1", false)]
+    [InlineData("::ffff:127.0.0.1", false)]
+    [InlineData("::", false)]
+    [InlineData("fe80::1", false)]
+    [InlineData("169.254.169.254", false)]
+    [InlineData("10.0.0.1", false)]
+    [InlineData("100.64.0.1", false)]
+    [InlineData("192.0.2.1", false)]
+    [InlineData("198.18.0.1", false)]
+    [InlineData("224.0.0.1", false)]
+    [InlineData("fc00::1", false)]
+    [InlineData("fec0::1", false)]
+    [InlineData("ff02::1", false)]
+    [InlineData("2001:db8::1", false)]
+    [InlineData("8.8.8.8", true)]
+    [InlineData("2606:4700:4700::1111", true)]
+    public void Connect_address_policy_allows_only_public_https_addresses(string raw, bool allowed)
+    {
+        Assert.Equal(allowed, IndexerAddressPolicy.IsPublicHttpsAddress(IPAddress.Parse(raw)));
+    }
+
     [Fact]
     public void Indexer_settings_preserve_blank_key_clear_explicit_key_and_redact_response()
     {
@@ -66,6 +108,31 @@ public sealed class IndexerTests
         Assert.False(result.Connected);
         Assert.Equal("Indexer returned an unexpected capability response.", result.Message);
         Assert.DoesNotContain("secret", result.Message);
+    }
+
+    [Theory]
+    [InlineData("Newznab", "newznab", true)]
+    [InlineData("Torznab", "TORZNAB", true)]
+    [InlineData("Newznab", "torznab", false)]
+    [InlineData("Newznab", "not-newznab", false)]
+    [InlineData("Newznab", "", false)]
+    public async Task Capability_test_confirms_only_the_configured_protocol_type(string configuredType, string serverType, bool confirmed)
+    {
+        var handler = new RecordingHandler(_ => Xml($"<caps><server type=\"{serverType}\"/></caps>"));
+        var result = await new IndexerClient(new HttpClient(handler)).TestCapabilitiesAsync(new IndexerConnection(configuredType, "https://news.example.test", "secret"), CancellationToken.None);
+
+        Assert.Equal(confirmed, result.ProtocolConfirmed);
+        Assert.Equal(confirmed, result.Connected);
+        Assert.Equal(confirmed ? "Indexer capability test succeeded." : "Indexer returned an unexpected capability response.", result.Message);
+    }
+
+    [Fact]
+    public async Task Capability_test_rejects_a_non_caps_root_document()
+    {
+        var result = await new IndexerClient(new HttpClient(new RecordingHandler(_ => Xml("<response><server type=\"newznab\"/></response>")))).TestCapabilitiesAsync(new IndexerConnection("Newznab", "https://news.example.test", "secret"), CancellationToken.None);
+
+        Assert.False(result.ProtocolConfirmed);
+        Assert.Equal("Indexer returned an unexpected capability response.", result.Message);
     }
 
     [Fact]
