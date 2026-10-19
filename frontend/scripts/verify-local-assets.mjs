@@ -3,11 +3,11 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
 const frontendRoot = path.resolve(import.meta.dirname, '..');
-const textAssetPattern = /\.(?:css|html|js|jsx|mjs|ts|tsx)$/i;
+const ignoredDirectoryNames = new Set(['.git', 'dist', 'node_modules', 'fixtures', '__fixtures__']);
 const externalBuildResourcePatterns = [
   /@import\s+(?:url\(\s*)?['"]?(https?:\/\/[^\s'"`<>)}]+)/gi,
   /url\(\s*['"]?(https?:\/\/[^\s'"`<>)}]+)/gi,
-  /<(?:audio|embed|iframe|img|link|object|script|source|track|video)\b[^>]*?\b(?:data|href|poster|src)\s*=\s*['"](https?:\/\/[^\s'"`<>)}]+)/gi,
+  /<(?:audio|embed|iframe|img|image|link|object|script|source|track|video)\b[^>]*?\b(?:data|href|poster|src)\s*=\s*['"](https?:\/\/[^\s'"`<>)}]+)/gi,
   /\b(?:fetch|import)\s*\(\s*['"](https?:\/\/[^\s'"`<>)}]+)/gi,
   /\bnew\s+(?:Shared)?Worker\s*\(\s*['"](https?:\/\/[^\s'"`<>)}]+)/gi,
 ];
@@ -29,18 +29,18 @@ async function pathExists(target) {
   }
 }
 
-async function collectTextAssets(target) {
+async function collectRegularFiles(target) {
   const entries = await readdir(target, { withFileTypes: true });
   const nested = await Promise.all(entries.map(async entry => {
     const asset = path.join(target, entry.name);
-    if (entry.isDirectory()) return collectTextAssets(asset);
-    return textAssetPattern.test(entry.name) ? [asset] : [];
+    if (entry.isDirectory()) return ignoredDirectoryNames.has(entry.name) ? [] : collectRegularFiles(asset);
+    return entry.isFile() ? [asset] : [];
   }));
   return nested.flat();
 }
 
 async function verifyLocalAssets(requireBuild) {
-  const sourceAssets = [path.join(frontendRoot, 'index.html'), ...await collectTextAssets(path.join(frontendRoot, 'src'))];
+  const sourceAssets = [path.join(frontendRoot, 'index.html'), ...await collectRegularFiles(path.join(frontendRoot, 'src'))];
   const buildDirectory = path.join(frontendRoot, 'dist');
 
   if (requireBuild && !await pathExists(buildDirectory)) {
@@ -53,7 +53,7 @@ async function verifyLocalAssets(requireBuild) {
     findings.push(...urls.map(url => `${path.relative(frontendRoot, asset)}: ${url}`));
   }
 
-  const buildAssets = await pathExists(buildDirectory) ? await collectTextAssets(buildDirectory) : [];
+  const buildAssets = await pathExists(buildDirectory) ? await collectRegularFiles(buildDirectory) : [];
   for (const asset of buildAssets) {
     const urls = findExternalBuildResourceUrls(await readFile(asset, 'utf8'));
     findings.push(...urls.map(url => `${path.relative(frontendRoot, asset)}: ${url}`));

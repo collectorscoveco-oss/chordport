@@ -1,28 +1,27 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import test from 'node:test';
 import { findExternalResourceUrls } from './verify-local-assets.mjs';
 
 const frontendRoot = path.resolve(import.meta.dirname, '..');
-const textAssetPattern = /\.(?:css|html|js|jsx|mjs|ts|tsx)$/i;
 const execFileAsync = promisify(execFile);
 
-async function collectTextAssets(directory) {
+async function collectRegularFiles(directory) {
   const entries = await readdir(directory, { withFileTypes: true });
   const nested = await Promise.all(entries.map(async entry => {
     const target = path.join(directory, entry.name);
-    if (entry.isDirectory()) return collectTextAssets(target);
-    return textAssetPattern.test(entry.name) ? [target] : [];
+    if (entry.isDirectory()) return collectRegularFiles(target);
+    return entry.isFile() ? [target] : [];
   }));
   return nested.flat();
 }
 
 test('production frontend source has no external HTTP(S) resource URLs', async () => {
   const sourceDirectory = path.join(frontendRoot, 'src');
-  const assets = await collectTextAssets(sourceDirectory);
+  const assets = await collectRegularFiles(sourceDirectory);
   const findings = [];
 
   for (const asset of assets) {
@@ -63,5 +62,57 @@ test('local asset validator reports a source filename and remote URL', async () 
     );
   } finally {
     await rm(fixture, { force: true });
+  }
+});
+
+test('local asset validator rejects remote loads in Vite-shippable SVG source assets', async () => {
+  const fixture = path.join(frontendRoot, 'src', '__local-assets-regression-fixture__.svg');
+  const url = 'https://cdn.example.invalid/remote-image.png';
+  await writeFile(fixture, `<svg xmlns="http://www.w3.org/2000/svg"><image href="${url}" /></svg>\n`);
+
+  try {
+    await assert.rejects(
+      execFileAsync(process.execPath, ['scripts/verify-local-assets.mjs'], { cwd: frontendRoot }),
+      error => error.stderr.includes('src/__local-assets-regression-fixture__.svg') && error.stderr.includes(url),
+    );
+  } finally {
+    await rm(fixture, { force: true });
+  }
+});
+
+test('local asset validator rejects remote SVG loads emitted in production build assets', async () => {
+  const fixture = path.join(frontendRoot, 'dist', 'assets', '__local-assets-regression-fixture__.svg');
+  const url = 'https://cdn.example.invalid/built-remote-image.png';
+  await mkdir(path.dirname(fixture), { recursive: true });
+  await writeFile(fixture, `<svg xmlns="http://www.w3.org/2000/svg"><image href="${url}" /></svg>\n`);
+
+  try {
+    await assert.rejects(
+      execFileAsync(process.execPath, ['scripts/verify-local-assets.mjs', '--require-build'], { cwd: frontendRoot }),
+      error => error.stderr.includes('dist/assets/__local-assets-regression-fixture__.svg') && error.stderr.includes(url),
+    );
+  } finally {
+    await rm(fixture, { force: true });
+  }
+});
+
+test('local asset validator does not traverse dependency or test fixture directories', async () => {
+  const ignoredDirectories = [
+    path.join(frontendRoot, 'src', 'node_modules', '__local-assets-regression-fixture__'),
+    path.join(frontendRoot, 'src', '__fixtures__', '__local-assets-regression-fixture__'),
+  ];
+  const url = 'https://cdn.example.invalid/ignored-remote-image.png';
+
+  await Promise.all(ignoredDirectories.map(async directory => {
+    await mkdir(directory, { recursive: true });
+    await writeFile(path.join(directory, 'remote.svg'), `<svg><image href="${url}" /></svg>\n`);
+  }));
+
+  try {
+    await assert.doesNotReject(
+      execFileAsync(process.execPath, ['scripts/verify-local-assets.mjs'], { cwd: frontendRoot }),
+    );
+  } finally {
+    await Promise.all(ignoredDirectories.map(directory => rm(directory, { force: true, recursive: true })));
   }
 });
