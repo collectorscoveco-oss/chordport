@@ -34,10 +34,12 @@ builder.Services.AddHttpClient<IMusicMetadataProvider, MusicBrainzClient>((sp, c
 });
 builder.Services.AddSingleton<SabnzbdSecretProtector>();
 builder.Services.AddHttpClient<SabnzbdClient>(client => client.Timeout = TimeSpan.FromSeconds(5)).RemoveAllLoggers();
-builder.Services.AddSingleton(new UpdateCheckOptions { CurrentVersion = "0.1.1" });
+builder.Services.AddSingleton<IndexerSecretProtector>();
+builder.Services.AddHttpClient<IndexerClient>(client => { client.Timeout = TimeSpan.FromSeconds(5); client.DefaultRequestHeaders.UserAgent.ParseAdd("ChordPort/0.1.2 (local indexer capability test)"); }).ConfigurePrimaryHttpMessageHandler(IndexerHttpHandlerFactory.Create).RemoveAllLoggers();
+builder.Services.AddSingleton(new UpdateCheckOptions { CurrentVersion = "0.1.2" });
 builder.Services.AddHttpClient<UpdateCheckClient>(client =>
 {
-    client.DefaultRequestHeaders.UserAgent.ParseAdd("ChordPort/0.1.1 (local update check)");
+    client.DefaultRequestHeaders.UserAgent.ParseAdd("ChordPort/0.1.2 (local update check)");
     client.Timeout = TimeSpan.FromSeconds(5);
 });
 builder.Services.AddSingleton<HealthService>();
@@ -51,6 +53,7 @@ using (var scope = app.Services.CreateScope())
     EnsureColumn(db, SettingsColumn.SabnzbdServerUrl);
     EnsureColumn(db, SettingsColumn.SabnzbdCategory);
     EnsureColumn(db, SettingsColumn.SabnzbdProtectedApiKey);
+    db.Database.ExecuteSqlRaw("CREATE TABLE IF NOT EXISTS Indexers (Id TEXT NOT NULL CONSTRAINT PK_Indexers PRIMARY KEY, Name TEXT NOT NULL, Type TEXT NOT NULL, ServerUrl TEXT NOT NULL, Enabled INTEGER NOT NULL, Priority INTEGER NOT NULL, Categories TEXT NULL, ProtectedApiKey TEXT NULL, LastTestedAt TEXT NULL, LastTestStatus TEXT NULL, LastTestMessage TEXT NULL, CapabilitySummary TEXT NULL)");
 }
 
 app.MapGet("/api/health", (HealthService health) => Results.Ok(health.Get()));
@@ -115,6 +118,33 @@ app.MapPost("/api/settings/sabnzbd/test", async (ChordPortDbContext db, SabnzbdS
     }
     catch (Exception exception) when (exception is CryptographicException) { return Results.BadRequest(new { error = "The saved SABnzbd key is unavailable. Save it again before testing." }); }
 });
+app.MapGet("/api/indexers", async (ChordPortDbContext db) => Results.Ok((await db.Indexers.OrderBy(item => item.Priority).ThenBy(item => item.Name).ToListAsync()).Select(ToIndexerResponse)));
+app.MapPost("/api/indexers", async (IndexerInput input, ChordPortDbContext db, IndexerSecretProtector secrets) =>
+{
+    var error = ValidateIndexer(input); if (error is not null) return Results.BadRequest(new { error });
+    var entity = new IndexerEntity { Id = Guid.NewGuid().ToString("N") };
+    ApplyIndexer(entity, input, string.IsNullOrWhiteSpace(input.ApiKey) ? null : secrets.Protect(input.ApiKey));
+    db.Indexers.Add(entity); await db.SaveChangesAsync(); return Results.Created($"/api/indexers/{entity.Id}", ToIndexerResponse(entity));
+});
+app.MapPut("/api/indexers/{id}", async (string id, IndexerInput input, ChordPortDbContext db, IndexerSecretProtector secrets) =>
+{
+    var entity = await db.Indexers.FindAsync(id); if (entity is null) return Results.NotFound(new { error = "Indexer was not found." });
+    var error = ValidateIndexer(input); if (error is not null) return Results.BadRequest(new { error });
+    ApplyIndexer(entity, input, string.IsNullOrWhiteSpace(input.ApiKey) ? null : secrets.Protect(input.ApiKey));
+    await db.SaveChangesAsync(); return Results.Ok(ToIndexerResponse(entity));
+});
+app.MapDelete("/api/indexers/{id}", async (string id, ChordPortDbContext db) => { var entity = await db.Indexers.FindAsync(id); if (entity is null) return Results.NotFound(new { error = "Indexer was not found." }); db.Indexers.Remove(entity); await db.SaveChangesAsync(); return Results.NoContent(); });
+app.MapPost("/api/indexers/{id}/test", async (string id, ChordPortDbContext db, IndexerSecretProtector secrets, IndexerClient indexers, CancellationToken cancellationToken) =>
+{
+    var entity = await db.Indexers.FindAsync(id); if (entity is null) return Results.NotFound(new { error = "Indexer was not found." });
+    if (string.IsNullOrWhiteSpace(entity.ProtectedApiKey)) return Results.BadRequest(new { error = "Save an API key before testing this indexer." });
+    try
+    {
+        var result = await indexers.TestCapabilitiesAsync(new IndexerConnection(entity.Type, entity.ServerUrl, secrets.Unprotect(entity.ProtectedApiKey)), cancellationToken);
+        entity.LastTestedAt = DateTimeOffset.UtcNow; entity.LastTestStatus = result.Connected ? "connected" : "error"; entity.LastTestMessage = result.Message; entity.CapabilitySummary = result.CapabilitySummary; await db.SaveChangesAsync(); return Results.Ok(result);
+    }
+    catch (CryptographicException) { return Results.BadRequest(new { error = "The saved indexer key is unavailable. Save it again before testing." }); }
+});
 app.MapGet("/api/system/update", async (UpdateCheckClient updates, CancellationToken cancellationToken) => Results.Ok(await updates.CheckAsync(cancellationToken)));
 app.UseDefaultFiles(); app.UseStaticFiles();
 app.MapFallbackToFile("index.html");
@@ -158,6 +188,20 @@ public partial class Program
         entity = new SettingsEntity(); db.Settings.Add(entity); await db.SaveChangesAsync(); return entity;
     }
 
+    private static string? ValidateIndexer(IndexerInput input)
+    {
+        if (string.IsNullOrWhiteSpace(input.Name) || input.Name.Trim().Length > 120) return "Indexer name is required and must be 120 characters or fewer.";
+        if (!IndexerClient.IsSupportedType(input.Type)) return "Indexer type must be Newznab or Torznab.";
+        if (input.Priority is < 0 or > 9999) return "Indexer priority must be between 0 and 9999.";
+        return IndexerEndpointValidator.Validate(input.ServerUrl).IsValid ? null : IndexerEndpointValidator.Validate(input.ServerUrl).Error;
+    }
+    private static void ApplyIndexer(IndexerEntity entity, IndexerInput input, string? protectedApiKey)
+    {
+        var merged = IndexerSettingsMerger.Merge(ToStoredIndexer(entity), input, protectedApiKey);
+        entity.Name = merged.Name; entity.Type = merged.Type; entity.ServerUrl = merged.ServerUrl; entity.Enabled = merged.Enabled; entity.Priority = merged.Priority; entity.Categories = merged.Categories; entity.ProtectedApiKey = merged.ProtectedApiKey;
+    }
+    private static StoredIndexer ToStoredIndexer(IndexerEntity entity) => new(entity.Id, entity.Name, entity.Type, entity.ServerUrl, entity.Enabled, entity.Priority, entity.Categories, entity.ProtectedApiKey, entity.LastTestedAt, entity.LastTestStatus, entity.LastTestMessage, entity.CapabilitySummary);
+    private static IndexerResponse ToIndexerResponse(IndexerEntity entity) => IndexerMapper.ToResponse(ToStoredIndexer(entity));
     private static StoredSabnzbdSettings ToStoredSettings(SettingsEntity entity) => new(entity.SabnzbdEnabled, entity.SabnzbdServerUrl, entity.SabnzbdCategory, entity.SabnzbdProtectedApiKey);
     private static SettingsResponse ToSettingsResponse(SettingsEntity entity) => new(entity.LibraryRoot, entity.ImportMode, entity.MetadataProvider, SabnzbdSettingsMapper.ToResponse(ToStoredSettings(entity)));
 }

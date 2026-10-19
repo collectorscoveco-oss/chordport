@@ -1,6 +1,6 @@
 # ChordPort
 
-ChordPort is a Windows-first, cross-platform local music request desk. V0.1.1 is a safe metadata/request manager: it ships with a small local starter catalog, a request queue, local settings, optional local SABnzbd connection testing, and system health. It does **not** acquire music, send downloads, contact indexers, manage accounts, expose remote access, or handle API secrets outside its protected local configuration.
+ChordPort is a Windows-first, cross-platform local music request desk. V0.1.2 is a safe metadata/request manager: it ships with a small local starter catalog, a request queue, local settings, optional local SABnzbd and indexer capability testing, and system health. It does **not** search indexers, poll RSS, acquire music, send downloads, manage accounts, or expose remote access.
 
 > Only use music and metadata from sources you are authorized to use. ChordPort never alters files in V0.1.
 
@@ -20,24 +20,32 @@ The key is protected with ASP.NET Core Data Protection before it reaches the loc
 
 **Test connection** makes one local/private request to SABnzbd's `mode=version` API to verify the saved address and key. It reports a safe success/failure message and does not add NZBs, send downloads, query indexers, or otherwise control SABnzbd. No download or send-to-SAB workflow exists in this release.
 
+## Indexers (Newznab and Torznab)
+
+In **Settings → Indexers**, add multiple Newznab or Torznab endpoints with a label, server root URL, enabled state, numeric priority, optional music category IDs, and API key. Newznab and Torznab are compatible indexer protocols; their **Test** action makes only a fixed capability request (`GET /api?t=caps&apikey=...`) and reports protocol confirmation plus reported music categories. No searches, RSS polling, NZB grabs, download sends, or automatic testing occur in this phase.
+
+Indexer configuration is per-app: ChordPort does not read or copy Radarr, Sonarr, Prowlarr, or other Arr settings. API keys are protected at rest with ASP.NET Core Data Protection, never returned by list/edit APIs or shown in the UI, and HTTP-client request logging is disabled for key-bearing capability tests. A blank API-key edit retains the saved key; **Clear saved key** removes it. Deleting an indexer removes its protected key with the record.
+
+Use a root/base URL only—no userinfo, path, query, or fragment. Remote indexers must use HTTPS. HTTP is permitted only for `localhost`, loopback, RFC1918, or IPv6 unique-local test endpoints. Redirects are disabled and tests use a short timeout and bounded response handling.
+
 ## Update checks
 
-The System screen can check whether a newer stable ChordPort release is available. The browser calls only ChordPort's local backend; the backend makes the GitHub `releases/latest` request, accepts only the project's HTTPS GitHub release-tag URL, compares stable semantic versions, and caches the result briefly. It never downloads, installs, applies, or restarts an update. This release reports current version `0.1.1`.
+The System screen can check whether a newer stable ChordPort release is available. The browser calls only ChordPort's local backend; the backend makes the GitHub `releases/latest` request, accepts only the project's HTTPS GitHub release-tag URL, compares stable semantic versions, and caches the result briefly. It never downloads, installs, applies, or restarts an update. This release reports current version `0.1.2`.
 
 ## Windows portable tester package
 
 A Windows x64 package is self-contained: testers do **not** need a .NET installation. From the repository root in PowerShell (PowerShell 7 is supported on Windows, Linux, and macOS), build it with:
 
 ```powershell
-./scripts/package-windows.ps1 -Version 0.1.1
+./scripts/package-windows.ps1 -Version 0.1.2
 ```
 
 The command publishes `win-x64` with `--self-contained true`, builds the React UI, and writes only ignored output beneath `artifacts/`:
 
-- `artifacts/ChordPort-0.1.1-win-x64/` — unpacked tester distribution
-- `artifacts/ChordPort-0.1.1-win-x64.zip` — versioned portable ZIP
+- `artifacts/ChordPort-0.1.2-win-x64/` — unpacked tester distribution
+- `artifacts/ChordPort-0.1.2-win-x64.zip` — versioned portable ZIP
 
-Extract the ZIP to a user-writable folder (for example, Downloads), open the extracted `ChordPort-0.1.1-win-x64` folder, and double-click `Start-ChordPort.cmd`. The launcher first refuses to start if any service is already listening on `http://127.0.0.1:5098`; close that service and retry. Otherwise, it starts `ChordPort.Api.exe` only on `http://127.0.0.1:5098`, waits for `GET /api/health` to return successfully, and only then opens the browser. Its console shows diagnostics and remains open when startup fails.
+Extract the ZIP to a user-writable folder (for example, Downloads), open the extracted `ChordPort-0.1.2-win-x64` folder, and double-click `Start-ChordPort.cmd`. The launcher first refuses to start if any service is already listening on `http://127.0.0.1:5098`; close that service and retry. Otherwise, it starts `ChordPort.Api.exe` only on `http://127.0.0.1:5098`, waits for `GET /api/health` to return successfully, and only then opens the browser. Its console shows diagnostics and remains open when startup fails.
 
 ### Package verification
 
@@ -45,7 +53,7 @@ WSL/Linux can build the self-contained `win-x64` package and inspect its ZIP con
 
 Use `taskkill /IM ChordPort.Api.exe` from Command Prompt to stop a running tester copy. To update, stop it, extract a new versioned ZIP to a new folder, and start the new launcher. Do not copy a new package over a running one.
 
-Tester data is deterministic and survives package replacement at `%LOCALAPPDATA%\ChordPort\chordport.db`, not beside the extracted app. Back up that directory before testing a pre-release update if you need to preserve requests and settings. This V0.1 package is local-only, has no remote access, acquisition, account, indexer, or secret-management features, and it is not code-signed; Windows may show a reputation warning for unsigned software.
+Tester data is deterministic and survives package replacement at `%LOCALAPPDATA%\ChordPort\chordport.db`, not beside the extracted app. Back up that directory before testing a pre-release update if you need to preserve requests and settings. This V0.1 package is local-only, has no remote access, acquisition, account, or active indexer-search features, and it is not code-signed; Windows may show a reputation warning for unsigned software.
 
 ## Windows development
 
@@ -97,6 +105,7 @@ Known limitations: the local catalog is still a small V0.1 starter set; MusicBra
 - `GET /api/search?mode=Songs|Artists|Albums&q=...&provider=Local%20catalog|MusicBrainz` — returns `{ provider, status, results, message }`; result IDs and entity types are explicit.
 - `GET /api/queue`, `POST /api/queue`, `DELETE /api/queue/{id}`
 - `GET /api/settings`, `PUT /api/settings` — SABnzbd responses mask the saved key; `POST /api/settings/sabnzbd/test` only calls SABnzbd's version endpoint.
+- `GET /api/indexers`, `POST /api/indexers`, `PUT /api/indexers/{id}`, `DELETE /api/indexers/{id}` — Newznab/Torznab records return only `hasApiKey`; `POST /api/indexers/{id}/test` performs the explicit capability test.
 - `GET /api/system/update` — backend-only GitHub release check; reports availability but never installs an update.
 
 Invalid inputs return small client-readable JSON error bodies and no internal details.
