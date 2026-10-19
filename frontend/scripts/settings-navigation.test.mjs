@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import {
   DEFAULT_SETTINGS_SECTION,
@@ -44,4 +45,18 @@ test('settings selection keeps the accordion open while root navigation closes i
 test('every existing functional section has a route definition', () => {
   const functionalIds = SETTINGS_SECTIONS.filter(section => section.status === 'active').map(section => section.id);
   assert.deepEqual(functionalIds, ['Media Management', 'Indexers', 'Download Clients', 'Metadata', 'General', 'UI']);
+});
+
+test('Download Clients retains Manage Indexers through the shared settings transition', async () => {
+  const source = await readFile(new URL('../src/main.tsx', import.meta.url), 'utf8');
+
+  assert.match(source, /nav==='Download Clients'[\s\S]*?<button[^>]*onClick=\{\(\)=>choose\('Indexers'\)\}[^>]*>Manage Indexers<\/button>/);
+});
+
+test('settings accordion uses a labelled native-button section rather than ARIA menu roles', async () => {
+  const source = await readFile(new URL('../src/main.tsx', import.meta.url), 'utf8');
+
+  assert.match(source, /<section id="settings-submenu" className="settings-submenu" aria-label="Settings sections">/);
+  assert.match(source, /aria-expanded=\{expanded\} aria-controls="settings-submenu"/);
+  assert.doesNotMatch(source, /role="(?:menu|menuitem)"/);
 });
