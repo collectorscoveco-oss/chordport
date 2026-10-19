@@ -1,6 +1,6 @@
 # ChordPort
 
-ChordPort is a Windows-first, cross-platform local music request desk. V0.1.3 is a safe metadata/request manager: it ships with a small local starter catalog, a request queue, local settings, optional local SABnzbd and indexer capability testing, and system health. It does **not** search indexers, poll RSS, acquire music, send downloads, manage accounts, or expose remote access.
+ChordPort is a Windows-first, cross-platform local music request desk. V0.1.4 is a safe metadata/request manager: it ships with a small local starter catalog, a request queue, local settings, optional local SABnzbd and indexer capability testing, and system health. It does **not** search indexers, poll RSS, acquire music, send downloads, manage accounts, or expose remote access.
 
 > Only use music and metadata from sources you are authorized to use. ChordPort never alters files in V0.1.
 
@@ -11,6 +11,10 @@ ChordPort is a Windows-first, cross-platform local music request desk. V0.1.3 is
 - `tests/ChordPort.Api.Tests` — xUnit coverage for catalog searching, queue behavior, settings validation, and the health endpoint.
 
 The backend binds to `127.0.0.1:5098` by default. On Windows it stores its SQLite database under `%LOCALAPPDATA%\ChordPort\chordport.db`; other platforms retain the application-directory default. Set `CHORDPORT_DATA_DIR` to an absolute user-writable directory only when an advanced local override is needed.
+
+## Settings navigation
+
+**Settings** is an accessible expandable sidebar section. Opening it selects **Media Management** and shows the ordered subsections: Media Management, Profiles, Quality, Custom Formats, Indexers, Download Clients, Import Lists, Connect, Metadata, Tags, General, and UI. Media Management, Download Clients, Indexers, Metadata, General, and UI expose the active V0.1 controls or local-status explanations. Profiles, Quality, Custom Formats, Import Lists, Connect, and Tags are clearly marked planned and remain navigable without implying functionality that is not active in this tester.
 
 ## SABnzbd connection settings
 
@@ -30,22 +34,22 @@ Use a root/base URL only—no userinfo, path, query, or fragment. Remote indexer
 
 ## Update checks
 
-The System screen can check whether a newer stable ChordPort release is available. The browser calls only ChordPort's local backend; the backend makes the GitHub `releases/latest` request, accepts only the project's HTTPS GitHub release-tag URL, compares stable semantic versions, and caches the result briefly. It never downloads, installs, applies, or restarts an update. This release reports current version `0.1.3`.
+The System screen can check whether a newer stable ChordPort release is available. The browser calls only ChordPort's local backend; the backend makes the GitHub `releases/latest` request, accepts only the project's HTTPS GitHub release-tag URL, compares stable semantic versions, and caches the result briefly. It never downloads, installs, applies, or restarts an update. This release reports current version `0.1.4`.
 
 ## Windows portable tester package
 
 A Windows x64 package is self-contained: testers do **not** need a .NET installation. From the repository root in PowerShell (PowerShell 7 is supported on Windows, Linux, and macOS), build it with:
 
 ```powershell
-./scripts/package-windows.ps1 -Version 0.1.3
+./scripts/package-windows.ps1 -Version 0.1.4
 ```
 
 The command publishes `win-x64` with `--self-contained true`, builds the React UI, and writes only ignored output beneath `artifacts/`:
 
-- `artifacts/ChordPort-0.1.3-win-x64/` — unpacked tester distribution
-- `artifacts/ChordPort-0.1.3-win-x64.zip` — versioned portable ZIP
+- `artifacts/ChordPort-0.1.4-win-x64/` — unpacked tester distribution
+- `artifacts/ChordPort-0.1.4-win-x64.zip` — versioned portable ZIP
 
-Extract the ZIP to a user-writable folder (for example, Downloads), open the extracted `ChordPort-0.1.3-win-x64` folder, and double-click `Start-ChordPort.cmd`. V0.1.3 corrects the Windows launcher's port-preflight syntax and occupied/free routing. The launcher refuses to start if any service is already listening on `http://127.0.0.1:5098`; close that service and retry. If the port is free, it starts `ChordPort.Api.exe` only on `http://127.0.0.1:5098`, waits for `GET /api/health` to return successfully, and only then opens the browser. Its console shows diagnostics and remains open when startup fails.
+Extract the ZIP to a user-writable folder (for example, Downloads), open the extracted `ChordPort-0.1.4-win-x64` folder, and double-click `Start-ChordPort.cmd`. V0.1.4 corrects the Windows launcher's port-preflight syntax and occupied/free routing. The launcher refuses to start if any service is already listening on `http://127.0.0.1:5098`; close that service and retry. If the port is free, it starts `ChordPort.Api.exe` only on `http://127.0.0.1:5098`, waits for `GET /api/health` to return successfully, and only then opens the browser. Its console shows diagnostics and remains open when startup fails.
 
 ### Package verification
 

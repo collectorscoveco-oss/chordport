@@ -94,7 +94,7 @@ public sealed class PortableDistributionContractTests
     [Fact]
     public void Windows_launcher_probe_runs_in_native_Windows_PowerShell_when_available()
     {
-        if (!CanRunWindowsPowerShell()) return;
+        if (!OperatingSystem.IsWindows() || !CanRunWindowsPowerShell()) return;
 
         var probe = ExtractPowerShellProbe(File.ReadAllText(Path.Combine(FindRepositoryRoot(), "scripts", "Start-ChordPort.cmd")));
         using var listener = new TcpListener(IPAddress.Loopback, 5098);
