@@ -10,7 +10,26 @@ ChordPort is a Windows-first, cross-platform local music request desk. V0.1 is a
 - `frontend` — React + TypeScript Vite UI. Production publish builds it and copies it into the backend's `wwwroot`.
 - `tests/ChordPort.Api.Tests` — xUnit coverage for catalog searching, queue behavior, settings validation, and the health endpoint.
 
-The backend binds to `127.0.0.1:5098` by default. SQLite uses a local `chordport.db`; no Windows-specific path is hardcoded.
+The backend binds to `127.0.0.1:5098` by default. On Windows it stores its SQLite database under `%LOCALAPPDATA%\ChordPort\chordport.db`; other platforms retain the application-directory default. Set `CHORDPORT_DATA_DIR` to an absolute user-writable directory only when an advanced local override is needed. ChordPort does not create, store, or require secrets.
+
+## Windows portable tester package
+
+A Windows x64 package is self-contained: testers do **not** need a .NET installation. From the repository root in PowerShell (PowerShell 7 is supported on Windows, Linux, and macOS), build it with:
+
+```powershell
+./scripts/package-windows.ps1 -Version 0.1.0
+```
+
+The command publishes `win-x64` with `--self-contained true`, builds the React UI, and writes only ignored output beneath `artifacts/`:
+
+- `artifacts/ChordPort-0.1.0-win-x64/` — unpacked tester distribution
+- `artifacts/ChordPort-0.1.0-win-x64.zip` — versioned portable ZIP
+
+Extract the ZIP to a user-writable folder (for example, Downloads), open the extracted `ChordPort-0.1.0-win-x64` folder, and double-click `Start-ChordPort.cmd`. The launcher starts `ChordPort.Api.exe` only on `http://127.0.0.1:5098`, waits for `GET /api/health` to return successfully, and only then opens the browser. Its console shows diagnostics and remains open when startup fails.
+
+Use `taskkill /IM ChordPort.Api.exe` from Command Prompt to stop a running tester copy. To update, stop it, extract a new versioned ZIP to a new folder, and start the new launcher. Do not copy a new package over a running one.
+
+Tester data is deterministic and survives package replacement at `%LOCALAPPDATA%\ChordPort\chordport.db`, not beside the extracted app. Back up that directory before testing a pre-release update if you need to preserve requests and settings. This V0.1 package is local-only, has no remote access, acquisition, account, indexer, or secret-management features, and it is not code-signed; Windows may show a reputation warning for unsigned software.
 
 ## Windows development
 

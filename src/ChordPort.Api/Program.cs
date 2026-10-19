@@ -4,13 +4,16 @@ using ChordPort.Api.Services;
 using Microsoft.EntityFrameworkCore;
 
 var applicationBaseDirectory = AppContext.BaseDirectory;
+var dataDirectory = RuntimeDataDirectory.ResolveDefault(applicationBaseDirectory);
+Directory.CreateDirectory(dataDirectory);
 var builder = WebApplication.CreateBuilder(new WebApplicationOptions
 {
     Args = args,
     ContentRootPath = applicationBaseDirectory,
     WebRootPath = Path.Combine(applicationBaseDirectory, "wwwroot")
 });
-builder.Services.AddDbContext<ChordPortDbContext>(options => options.UseSqlite(builder.Configuration.GetConnectionString("ChordPort") ?? "Data Source=chordport.db"));
+var defaultConnectionString = $"Data Source={Path.Combine(dataDirectory, "chordport.db")}";
+builder.Services.AddDbContext<ChordPortDbContext>(options => options.UseSqlite(builder.Configuration.GetConnectionString("ChordPort") ?? defaultConnectionString));
 builder.Services.AddSingleton<CatalogService>();
 builder.Services.AddSingleton<ICatalogAdapter>(sp => sp.GetRequiredService<CatalogService>());
 builder.Services.AddSingleton<SettingsService>();
