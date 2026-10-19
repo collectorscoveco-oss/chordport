@@ -15,8 +15,8 @@ if not exist "%DIST_DIR%ChordPort.Api.exe" (
 
 powershell.exe -NoLogo -NoProfile -NonInteractive -Command "$client = $null; try { $client = [System.Net.Sockets.TcpClient]::new(); $client.Connect('127.0.0.1', 5098); exit 0 } catch [System.Net.Sockets.SocketException] { if ($_.Exception.SocketErrorCode -eq [System.Net.Sockets.SocketError]::ConnectionRefused) { exit 1 }; exit 2 } catch { exit 2 } finally { if ($null -ne $client) { $client.Dispose() } } }"
 if errorlevel 2 goto :port_preflight_failed
-if errorlevel 1 goto :port_available
-goto :port_in_use
+if errorlevel 1 goto :port_in_use
+goto :port_available
 
 :port_in_use
 echo A local service is already listening at %URL%.
