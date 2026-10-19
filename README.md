@@ -25,7 +25,7 @@ For WSL, use the equivalent paths supplied by your environment. Then:
 
 ```powershell
 cd chordport\frontend
-npm install
+npm ci
 npm run dev
 # separate terminal:
 cd ..
