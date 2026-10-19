@@ -3,11 +3,11 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
 const frontendRoot = path.resolve(import.meta.dirname, '..');
-const ignoredDirectoryNames = new Set(['.git', 'dist', 'node_modules', 'fixtures', '__fixtures__']);
+const sourceIgnoredDirectoryNames = new Set(['.git', 'dist', 'node_modules', 'fixtures', '__fixtures__']);
 const externalBuildResourcePatterns = [
   /@import\s+(?:url\(\s*)?['"]?(https?:\/\/[^\s'"`<>)}]+)/gi,
   /url\(\s*['"]?(https?:\/\/[^\s'"`<>)}]+)/gi,
-  /<(?:audio|embed|iframe|img|image|link|object|script|source|track|video)\b[^>]*?\b(?:data|href|poster|src)\s*=\s*['"](https?:\/\/[^\s'"`<>)}]+)/gi,
+  /<(?:audio|embed|iframe|img|image|feImage|link|object|script|source|track|use|video)\b[^>]*?\b(?:data|href|poster|src)\s*=\s*['"](https?:\/\/[^\s'"`<>)}]+)/gi,
   /\b(?:fetch|import)\s*\(\s*['"](https?:\/\/[^\s'"`<>)}]+)/gi,
   /\bnew\s+(?:Shared)?Worker\s*\(\s*['"](https?:\/\/[^\s'"`<>)}]+)/gi,
 ];
@@ -29,18 +29,18 @@ async function pathExists(target) {
   }
 }
 
-async function collectRegularFiles(target) {
+async function collectRegularFiles(target, ignoredDirectoryNames = new Set()) {
   const entries = await readdir(target, { withFileTypes: true });
   const nested = await Promise.all(entries.map(async entry => {
     const asset = path.join(target, entry.name);
-    if (entry.isDirectory()) return ignoredDirectoryNames.has(entry.name) ? [] : collectRegularFiles(asset);
+    if (entry.isDirectory()) return ignoredDirectoryNames.has(entry.name) ? [] : collectRegularFiles(asset, ignoredDirectoryNames);
     return entry.isFile() ? [asset] : [];
   }));
   return nested.flat();
 }
 
 async function verifyLocalAssets(requireBuild) {
-  const sourceAssets = [path.join(frontendRoot, 'index.html'), ...await collectRegularFiles(path.join(frontendRoot, 'src'))];
+  const sourceAssets = [path.join(frontendRoot, 'index.html'), ...await collectRegularFiles(path.join(frontendRoot, 'src'), sourceIgnoredDirectoryNames)];
   const buildDirectory = path.join(frontendRoot, 'dist');
 
   if (requireBuild && !await pathExists(buildDirectory)) {

@@ -96,6 +96,41 @@ test('local asset validator rejects remote SVG loads emitted in production build
   }
 });
 
+test('local asset validator traverses fixture directories in production build assets', async () => {
+  const fixture = path.join(frontendRoot, 'dist', 'fixtures', 'remote.svg');
+  const url = 'https://cdn.example.invalid/built-fixture-remote-image.png';
+  await mkdir(path.dirname(fixture), { recursive: true });
+  await writeFile(fixture, `<svg xmlns="http://www.w3.org/2000/svg"><image href="${url}" /></svg>\n`);
+
+  try {
+    await assert.rejects(
+      execFileAsync(process.execPath, ['scripts/verify-local-assets.mjs', '--require-build'], { cwd: frontendRoot }),
+      error => error.stderr.includes('dist/fixtures/remote.svg') && error.stderr.includes(url),
+    );
+  } finally {
+    await rm(path.dirname(fixture), { force: true, recursive: true });
+  }
+});
+
+test('local asset validator rejects remote SVG feImage and use references in production build assets', async () => {
+  const fixture = path.join(frontendRoot, 'dist', 'assets', '__local-assets-svg-reference-regression-fixture__.svg');
+  const feImageUrl = 'https://cdn.example.invalid/built-filter-image.png';
+  const useUrl = 'https://cdn.example.invalid/built-use-reference.svg#icon';
+  await mkdir(path.dirname(fixture), { recursive: true });
+  await writeFile(fixture, `<svg xmlns="http://www.w3.org/2000/svg"><filter id="filter"><feImage href="${feImageUrl}" /></filter><use href="${useUrl}" /></svg>\n`);
+
+  try {
+    await assert.rejects(
+      execFileAsync(process.execPath, ['scripts/verify-local-assets.mjs', '--require-build'], { cwd: frontendRoot }),
+      error => error.stderr.includes('dist/assets/__local-assets-svg-reference-regression-fixture__.svg')
+        && error.stderr.includes(feImageUrl)
+        && error.stderr.includes(useUrl),
+    );
+  } finally {
+    await rm(fixture, { force: true });
+  }
+});
+
 test('local asset validator does not traverse dependency or test fixture directories', async () => {
   const ignoredDirectories = [
     path.join(frontendRoot, 'src', 'node_modules', '__local-assets-regression-fixture__'),
