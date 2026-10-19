@@ -25,7 +25,11 @@ The command publishes `win-x64` with `--self-contained true`, builds the React U
 - `artifacts/ChordPort-0.1.0-win-x64/` — unpacked tester distribution
 - `artifacts/ChordPort-0.1.0-win-x64.zip` — versioned portable ZIP
 
-Extract the ZIP to a user-writable folder (for example, Downloads), open the extracted `ChordPort-0.1.0-win-x64` folder, and double-click `Start-ChordPort.cmd`. The launcher starts `ChordPort.Api.exe` only on `http://127.0.0.1:5098`, waits for `GET /api/health` to return successfully, and only then opens the browser. Its console shows diagnostics and remains open when startup fails.
+Extract the ZIP to a user-writable folder (for example, Downloads), open the extracted `ChordPort-0.1.0-win-x64` folder, and double-click `Start-ChordPort.cmd`. The launcher first refuses to start if any service is already listening on `http://127.0.0.1:5098`; close that service and retry. Otherwise, it starts `ChordPort.Api.exe` only on `http://127.0.0.1:5098`, waits for `GET /api/health` to return successfully, and only then opens the browser. Its console shows diagnostics and remains open when startup fails.
+
+### Package verification
+
+WSL/Linux can build the self-contained `win-x64` package and inspect its ZIP contents, but the resulting Windows EXE and `.cmd` launcher cannot be executed or smoke-tested from WSL or Linux. Native Windows validation is still required: on a Windows x64 machine, extract the ZIP, run `Start-ChordPort.cmd`, confirm the health check succeeds at `http://127.0.0.1:5098/api/health`, and verify the browser opens only after it is healthy.
 
 Use `taskkill /IM ChordPort.Api.exe` from Command Prompt to stop a running tester copy. To update, stop it, extract a new versioned ZIP to a new folder, and start the new launcher. Do not copy a new package over a running one.
 
