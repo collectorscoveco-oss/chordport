@@ -33,7 +33,7 @@ builder.Services.AddHttpClient<IMusicMetadataProvider, MusicBrainzClient>((sp, c
     client.Timeout = options.Timeout;
 });
 builder.Services.AddSingleton<SabnzbdSecretProtector>();
-builder.Services.AddHttpClient<SabnzbdClient>(client => client.Timeout = TimeSpan.FromSeconds(5));
+builder.Services.AddHttpClient<SabnzbdClient>(client => client.Timeout = TimeSpan.FromSeconds(5)).RemoveAllLoggers();
 builder.Services.AddSingleton(new UpdateCheckOptions { CurrentVersion = "0.1.1" });
 builder.Services.AddHttpClient<UpdateCheckClient>(client =>
 {
