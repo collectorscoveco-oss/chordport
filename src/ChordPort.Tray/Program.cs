@@ -1,5 +1,6 @@
 using System.Drawing;
 using System.Net.Http;
+using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Windows.Forms;
 
@@ -13,26 +14,17 @@ internal static class Program
     [STAThread]
     private static void Main()
     {
+        using var openSignal = TrayInstanceCoordinator.CreateOpenSignal(UserSuffix);
         using var mutex = new Mutex(true, $"Local\\ChordPort.Tray.{UserSuffix}", out var ownsMutex);
         if (!ownsMutex)
         {
-            TrySignalExistingInstance();
+            openSignal.Set();
             return;
         }
 
         ApplicationConfiguration.Initialize();
-        using var controller = new TrayController(Url, UserSuffix);
+        using var controller = new TrayController(Url, openSignal);
         Application.Run();
-    }
-
-    private static void TrySignalExistingInstance()
-    {
-        try
-        {
-            using var open = EventWaitHandle.OpenExisting($"Local\\ChordPort.Tray.Open.{UserSuffix}");
-            open.Set();
-        }
-        catch (WaitHandleCannotBeOpenedException) { }
     }
 }
 
@@ -43,9 +35,10 @@ internal sealed class TrayController : IDisposable
     private readonly System.Windows.Forms.Timer _healthTimer;
     private readonly EventWaitHandle _openSignal;
     private readonly RegisteredWaitHandle _openRegistration;
+    private readonly ConsecutiveHealthFailureTracker _healthFailures = new(threshold: 3);
     private bool _disposed;
 
-    public TrayController(string url, string userSuffix)
+    public TrayController(string url, EventWaitHandle openSignal)
     {
         _client = new HttpClient { BaseAddress = new Uri(url), Timeout = TimeSpan.FromSeconds(2) };
         _icon = new NotifyIcon
@@ -59,7 +52,7 @@ internal sealed class TrayController : IDisposable
         _healthTimer = new System.Windows.Forms.Timer { Interval = 5000 };
         _healthTimer.Tick += async (_, _) => await RemoveIfApiStoppedAsync();
         _healthTimer.Start();
-        _openSignal = new EventWaitHandle(false, EventResetMode.AutoReset, $"Local\\ChordPort.Tray.Open.{userSuffix}");
+        _openSignal = openSignal;
         _openRegistration = ThreadPool.RegisterWaitForSingleObject(_openSignal, (_, _) => OpenChordPort(), null, -1, false);
     }
 
@@ -83,7 +76,10 @@ internal sealed class TrayController : IDisposable
             using var font = new Font(FontFamily.GenericSansSerif, 17, FontStyle.Bold, GraphicsUnit.Pixel);
             graphics.DrawString("C", font, Brushes.Black, new PointF(8, 6));
         }
-        return Icon.FromHandle(bitmap.GetHicon());
+        var handle = bitmap.GetHicon();
+        return IconHandleLifetime.CloneAndDestroy(handle,
+            original => (Icon)Icon.FromHandle(original).Clone(),
+            original => NativeMethods.DestroyIcon(original));
     }
 
     private static void OpenChordPort()
@@ -109,7 +105,7 @@ internal sealed class TrayController : IDisposable
 
     private async Task RemoveIfApiStoppedAsync()
     {
-        if (!await IsChordPortHealthyAsync()) Application.Exit();
+        if (_healthFailures.ShouldExitAfterHealthCheck(await IsChordPortHealthyAsync())) Application.Exit();
     }
 
     private async Task<bool> IsChordPortHealthyAsync()
@@ -135,9 +131,15 @@ internal sealed class TrayController : IDisposable
         _healthTimer.Stop();
         _healthTimer.Dispose();
         _openRegistration.Unregister(null);
-        _openSignal.Dispose();
         _icon.Visible = false;
         _icon.Dispose();
         _client.Dispose();
     }
+}
+
+internal static class NativeMethods
+{
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool DestroyIcon(IntPtr handle);
 }
