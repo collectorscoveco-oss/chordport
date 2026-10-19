@@ -1,0 +1,14 @@
+bin/
+obj/
+node_modules/
+dist/
+artifacts/
+*.db
+*.db-shm
+*.db-wal
+*.tsbuildinfo
+frontend/vite.config.js
+frontend/vite.config.d.ts
+.env
+.vs/
+.idea/
