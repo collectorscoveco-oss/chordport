@@ -43,6 +43,15 @@ public sealed class LibraryServiceTests
     }
 
     [Fact]
+    public void Settings_rejects_unsupported_metadata_provider()
+    {
+        var settings = new SettingsService();
+        var result = settings.Update(new Settings("Music", "Manual", "Remote catalog"));
+        Assert.False(result.IsValid);
+        Assert.Equal("Metadata provider is not supported.", result.Error);
+    }
+
+    [Fact]
     public void Health_reports_healthy_local_service()
     {
         var health = new HealthService();

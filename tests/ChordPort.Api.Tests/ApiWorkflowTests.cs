@@ -19,6 +19,15 @@ public sealed class ApiWorkflowTests : IClassFixture<WebApplicationFactory<Progr
     }
 
     [Fact]
+    public async Task Search_rejects_an_unknown_metadata_provider_with_client_error()
+    {
+        var response = await _client.GetAsync("/api/search?mode=Songs&q=midnight&provider=Unknown");
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        var body = await response.Content.ReadAsStringAsync();
+        Assert.Contains("provider must be Local catalog or MusicBrainz.", body);
+    }
+
+    [Fact]
     public async Task Settings_can_be_saved_on_a_new_database()
     {
         var response = await _client.PutAsJsonAsync("/api/settings", new { libraryRoot = "Music", importMode = "Manual" });
