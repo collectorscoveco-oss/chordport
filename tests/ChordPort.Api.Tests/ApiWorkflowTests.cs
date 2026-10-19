@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Http.Json;
+using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 
 namespace ChordPort.Api.Tests;
@@ -25,6 +26,23 @@ public sealed class ApiWorkflowTests : IClassFixture<WebApplicationFactory<Progr
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
         var body = await response.Content.ReadAsStringAsync();
         Assert.Contains("provider must be Local catalog or MusicBrainz.", body);
+    }
+
+    [Fact]
+    public async Task MusicBrainz_search_with_malformed_base_url_returns_safe_provider_error()
+    {
+        using var factory = new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
+            builder.UseSetting("MusicBrainz:BaseUrl", "not a valid URI"));
+        using var client = factory.CreateClient();
+
+        var response = await client.GetAsync("/api/search?mode=Songs&q=midnight&provider=MusicBrainz");
+        var body = await response.Content.ReadAsStringAsync();
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Contains("\"status\":\"error\"", body);
+        Assert.Contains("MusicBrainz could not be reached. Try again later.", body);
+        Assert.DoesNotContain("UriFormatException", body);
+        Assert.DoesNotContain("MusicBrainzClient", body);
     }
 
     [Fact]

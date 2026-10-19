@@ -17,11 +17,27 @@ public interface IMusicMetadataProvider
     Task<MetadataSearchResponse> SearchAsync(SearchMode mode, string? query, CancellationToken cancellationToken);
 }
 
-public sealed class MusicBrainzClient(HttpClient httpClient, MusicBrainzOptions options) : IMusicMetadataProvider
+public sealed class MusicBrainzClient : IMusicMetadataProvider
 {
     private readonly SemaphoreSlim _requestGate = new(1, 1);
     private readonly Dictionary<string, (DateTimeOffset ExpiresAt, MetadataSearchResponse Response)> _cache = new();
+    private readonly HttpClient _httpClient;
+    private readonly MusicBrainzOptions _options;
+    private readonly Func<DateTimeOffset> _utcNow;
+    private readonly Func<TimeSpan, CancellationToken, Task> _delayAsync;
     private DateTimeOffset _lastRequestAt = DateTimeOffset.MinValue;
+
+    public MusicBrainzClient(
+        HttpClient httpClient,
+        MusicBrainzOptions options,
+        Func<DateTimeOffset>? utcNow = null,
+        Func<TimeSpan, CancellationToken, Task>? delayAsync = null)
+    {
+        _httpClient = httpClient;
+        _options = options;
+        _utcNow = utcNow ?? (() => DateTimeOffset.UtcNow);
+        _delayAsync = delayAsync ?? Task.Delay;
+    }
 
     public async Task<MetadataSearchResponse> SearchAsync(SearchMode mode, string? query, CancellationToken cancellationToken)
     {
@@ -30,7 +46,7 @@ public sealed class MusicBrainzClient(HttpClient httpClient, MusicBrainzOptions 
         var cacheKey = $"{mode}:{term}";
         lock (_cache)
         {
-            if (_cache.TryGetValue(cacheKey, out var cached) && cached.ExpiresAt > DateTimeOffset.UtcNow) return cached.Response;
+            if (_cache.TryGetValue(cacheKey, out var cached) && cached.ExpiresAt > _utcNow()) return cached.Response;
         }
 
         try
@@ -40,23 +56,22 @@ public sealed class MusicBrainzClient(HttpClient httpClient, MusicBrainzOptions 
             {
                 lock (_cache)
                 {
-                    if (_cache.TryGetValue(cacheKey, out var cached) && cached.ExpiresAt > DateTimeOffset.UtcNow) return cached.Response;
+                    if (_cache.TryGetValue(cacheKey, out var cached) && cached.ExpiresAt > _utcNow()) return cached.Response;
                 }
-                var wait = options.MinimumRequestInterval - (DateTimeOffset.UtcNow - _lastRequestAt);
-                if (wait > TimeSpan.Zero) await Task.Delay(wait, cancellationToken);
+                var wait = _options.MinimumRequestInterval - (_utcNow() - _lastRequestAt);
+                if (wait > TimeSpan.Zero) await _delayAsync(wait, cancellationToken);
                 var path = mode switch { SearchMode.Songs => "recording", SearchMode.Artists => "artist", SearchMode.Albums => "release-group", _ => "recording" };
-                var baseUrl = options.BaseUrl.TrimEnd('/');
-                var uri = new Uri($"{baseUrl}/{path}?query={Uri.EscapeDataString(term)}&fmt=json");
-                if (!httpClient.DefaultRequestHeaders.UserAgent.Any()) httpClient.DefaultRequestHeaders.UserAgent.ParseAdd("ChordPort/0.1 (local metadata search)");
+                if (!TryCreateSearchUri(_options.BaseUrl, path, term, out var uri)) return Failure();
+                if (!_httpClient.DefaultRequestHeaders.UserAgent.Any()) _httpClient.DefaultRequestHeaders.UserAgent.ParseAdd("ChordPort/0.1 (local metadata search)");
                 using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-                timeout.CancelAfter(options.Timeout);
-                using var response = await httpClient.GetAsync(uri, timeout.Token);
-                _lastRequestAt = DateTimeOffset.UtcNow;
+                timeout.CancelAfter(_options.Timeout);
+                _lastRequestAt = _utcNow();
+                using var response = await _httpClient.GetAsync(uri, timeout.Token);
                 if (!response.IsSuccessStatusCode) return Failure();
                 await using var stream = await response.Content.ReadAsStreamAsync(timeout.Token);
                 using var document = await JsonDocument.ParseAsync(stream, cancellationToken: timeout.Token);
                 var result = Parse(mode, document.RootElement);
-                lock (_cache) _cache[cacheKey] = (DateTimeOffset.UtcNow.Add(options.CacheDuration), result);
+                lock (_cache) _cache[cacheKey] = (_utcNow().Add(_options.CacheDuration), result);
                 return result;
             }
             finally { _requestGate.Release(); }
@@ -64,6 +79,20 @@ public sealed class MusicBrainzClient(HttpClient httpClient, MusicBrainzOptions 
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested) { return Failure(); }
         catch (HttpRequestException) { return Failure(); }
         catch (JsonException) { return Failure(); }
+    }
+
+    private static bool TryCreateSearchUri(string? baseUrl, string path, string term, out Uri uri)
+    {
+        uri = null!;
+        if (string.IsNullOrWhiteSpace(baseUrl)) return false;
+        var normalized = baseUrl.TrimEnd('/');
+        if (!Uri.TryCreate(normalized, UriKind.Absolute, out var baseUri) ||
+            baseUri is null ||
+            (baseUri.Scheme != Uri.UriSchemeHttp && baseUri.Scheme != Uri.UriSchemeHttps) ||
+            string.IsNullOrWhiteSpace(baseUri.Host)) return false;
+        if (!Uri.TryCreate($"{normalized}/{path}?query={Uri.EscapeDataString(term)}&fmt=json", UriKind.Absolute, out var searchUri) || searchUri is null) return false;
+        uri = searchUri;
+        return true;
     }
 
     private static MetadataSearchResponse Parse(SearchMode mode, JsonElement root)

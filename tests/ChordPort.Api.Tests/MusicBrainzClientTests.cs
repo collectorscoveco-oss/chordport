@@ -83,17 +83,25 @@ public sealed class MusicBrainzClientTests
     }
 
     [Fact]
-    public async Task Search_throttles_distinct_uncached_requests()
+    public async Task Search_throttles_a_second_failed_attempt_using_the_attempt_time()
     {
-        var handler = new FakeHttpMessageHandler(_ => Json("{\"recordings\":[]}"));
+        var handler = new FakeHttpMessageHandler(_ => throw new HttpRequestException("offline"));
+        var now = DateTimeOffset.UnixEpoch;
+        var delays = new List<TimeSpan>();
         var client = new MusicBrainzClient(new HttpClient(handler), new MusicBrainzOptions
         {
-            BaseUrl = "https://metadata.example/ws/2", MinimumRequestInterval = TimeSpan.FromMilliseconds(40)
+            BaseUrl = "https://metadata.example/ws/2", MinimumRequestInterval = TimeSpan.FromSeconds(1)
+        }, () => now, (delay, _) =>
+        {
+            delays.Add(delay);
+            now = now.Add(delay);
+            return Task.CompletedTask;
         });
-        var started = DateTimeOffset.UtcNow;
+
         await client.SearchAsync(SearchMode.Songs, "first", CancellationToken.None);
         await client.SearchAsync(SearchMode.Songs, "second", CancellationToken.None);
-        Assert.True(DateTimeOffset.UtcNow - started >= TimeSpan.FromMilliseconds(35));
+
+        Assert.Equal([TimeSpan.FromSeconds(1)], delays);
         Assert.Equal(2, handler.Requests.Count);
     }
 
@@ -101,10 +109,21 @@ public sealed class MusicBrainzClientTests
     public async Task Search_uses_cached_result_without_second_request()
     {
         var handler = new FakeHttpMessageHandler(_ => Json("{\"recordings\":[]}"));
-        var client = CreateClient(handler);
+        var now = DateTimeOffset.UnixEpoch;
+        var delays = new List<TimeSpan>();
+        var client = new MusicBrainzClient(new HttpClient(handler), new MusicBrainzOptions
+        {
+            BaseUrl = "https://metadata.example/ws/2", MinimumRequestInterval = TimeSpan.FromSeconds(1)
+        }, () => now, (delay, _) =>
+        {
+            delays.Add(delay);
+            now = now.Add(delay);
+            return Task.CompletedTask;
+        });
         await client.SearchAsync(SearchMode.Songs, "cached", CancellationToken.None);
         await client.SearchAsync(SearchMode.Songs, "cached", CancellationToken.None);
         Assert.Single(handler.Requests);
+        Assert.Empty(delays);
     }
 
     private static MusicBrainzClient CreateClient(HttpMessageHandler handler) => new(
