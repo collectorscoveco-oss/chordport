@@ -1,6 +1,6 @@
 # ChordPort
 
-ChordPort is a Windows-first, cross-platform local music request desk. V0.1 is a safe metadata/request manager: it ships with a small local starter catalog, a request queue, local settings, and system health. It does **not** acquire music, contact indexers, manage accounts, expose remote access, or handle API secrets.
+ChordPort is a Windows-first, cross-platform local music request desk. V0.1.1 is a safe metadata/request manager: it ships with a small local starter catalog, a request queue, local settings, optional local SABnzbd connection testing, and system health. It does **not** acquire music, send downloads, contact indexers, manage accounts, expose remote access, or handle API secrets outside its protected local configuration.
 
 > Only use music and metadata from sources you are authorized to use. ChordPort never alters files in V0.1.
 
@@ -10,22 +10,34 @@ ChordPort is a Windows-first, cross-platform local music request desk. V0.1 is a
 - `frontend` — React + TypeScript Vite UI. Production publish builds it and copies it into the backend's `wwwroot`.
 - `tests/ChordPort.Api.Tests` — xUnit coverage for catalog searching, queue behavior, settings validation, and the health endpoint.
 
-The backend binds to `127.0.0.1:5098` by default. On Windows it stores its SQLite database under `%LOCALAPPDATA%\ChordPort\chordport.db`; other platforms retain the application-directory default. Set `CHORDPORT_DATA_DIR` to an absolute user-writable directory only when an advanced local override is needed. ChordPort does not create, store, or require secrets.
+The backend binds to `127.0.0.1:5098` by default. On Windows it stores its SQLite database under `%LOCALAPPDATA%\ChordPort\chordport.db`; other platforms retain the application-directory default. Set `CHORDPORT_DATA_DIR` to an absolute user-writable directory only when an advanced local override is needed.
+
+## SABnzbd connection settings
+
+In **Settings → Download Clients → SABnzbd**, enter a root server URL such as `http://127.0.0.1:8080`, an optional SABnzbd category (default `music`), and the SABnzbd API key. The server URL is deliberately restricted to `localhost`, loopback, or RFC1918/unique-local private network addresses; public hosts, URL paths, credentials, query strings, and fragments are rejected.
+
+The key is protected with ASP.NET Core Data Protection before it reaches the local SQLite database. The UI only reports whether a key is saved; it never reads the value back. Leaving the key blank preserves the existing saved key, while **Clear saved key** explicitly removes it. ChordPort never logs the key or includes it in API responses. The protected key material is stored in the local data directory; access to that directory is equivalent to access to local ChordPort settings.
+
+**Test connection** makes one local/private request to SABnzbd's `mode=version` API to verify the saved address and key. It reports a safe success/failure message and does not add NZBs, send downloads, query indexers, or otherwise control SABnzbd. No download or send-to-SAB workflow exists in this release.
+
+## Update checks
+
+The System screen can check whether a newer stable ChordPort release is available. The browser calls only ChordPort's local backend; the backend makes the GitHub `releases/latest` request, accepts only the project's HTTPS GitHub release-tag URL, compares stable semantic versions, and caches the result briefly. It never downloads, installs, applies, or restarts an update. This release reports current version `0.1.1`.
 
 ## Windows portable tester package
 
 A Windows x64 package is self-contained: testers do **not** need a .NET installation. From the repository root in PowerShell (PowerShell 7 is supported on Windows, Linux, and macOS), build it with:
 
 ```powershell
-./scripts/package-windows.ps1 -Version 0.1.0
+./scripts/package-windows.ps1 -Version 0.1.1
 ```
 
 The command publishes `win-x64` with `--self-contained true`, builds the React UI, and writes only ignored output beneath `artifacts/`:
 
-- `artifacts/ChordPort-0.1.0-win-x64/` — unpacked tester distribution
-- `artifacts/ChordPort-0.1.0-win-x64.zip` — versioned portable ZIP
+- `artifacts/ChordPort-0.1.1-win-x64/` — unpacked tester distribution
+- `artifacts/ChordPort-0.1.1-win-x64.zip` — versioned portable ZIP
 
-Extract the ZIP to a user-writable folder (for example, Downloads), open the extracted `ChordPort-0.1.0-win-x64` folder, and double-click `Start-ChordPort.cmd`. The launcher first refuses to start if any service is already listening on `http://127.0.0.1:5098`; close that service and retry. Otherwise, it starts `ChordPort.Api.exe` only on `http://127.0.0.1:5098`, waits for `GET /api/health` to return successfully, and only then opens the browser. Its console shows diagnostics and remains open when startup fails.
+Extract the ZIP to a user-writable folder (for example, Downloads), open the extracted `ChordPort-0.1.1-win-x64` folder, and double-click `Start-ChordPort.cmd`. The launcher first refuses to start if any service is already listening on `http://127.0.0.1:5098`; close that service and retry. Otherwise, it starts `ChordPort.Api.exe` only on `http://127.0.0.1:5098`, waits for `GET /api/health` to return successfully, and only then opens the browser. Its console shows diagnostics and remains open when startup fails.
 
 ### Package verification
 
@@ -84,6 +96,7 @@ Known limitations: the local catalog is still a small V0.1 starter set; MusicBra
 - `GET /api/health`
 - `GET /api/search?mode=Songs|Artists|Albums&q=...&provider=Local%20catalog|MusicBrainz` — returns `{ provider, status, results, message }`; result IDs and entity types are explicit.
 - `GET /api/queue`, `POST /api/queue`, `DELETE /api/queue/{id}`
-- `GET /api/settings`, `PUT /api/settings`
+- `GET /api/settings`, `PUT /api/settings` — SABnzbd responses mask the saved key; `POST /api/settings/sabnzbd/test` only calls SABnzbd's version endpoint.
+- `GET /api/system/update` — backend-only GitHub release check; reports availability but never installs an update.
 
 Invalid inputs return small client-readable JSON error bodies and no internal details.
