@@ -6,6 +6,10 @@ using System.Threading;
 using System.Net;
 using System.Text;
 using ChordPort.Api.Services;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 
 namespace ChordPort.Api.Tests;
 
@@ -33,6 +37,62 @@ public sealed class ManualAcquisitionTests
     {
         Assert.ThrowsAny<Exception>(() => IndexerSearchClient.ParseAtom(new MemoryStream(Encoding.UTF8.GetBytes(xml))));
     }
+    [Theory]
+    [InlineData("<!DOCTYPE rss [<!ENTITY x 'bad'>]><rss><channel><item><title>&x;</title><guid>x</guid></item></channel></rss>")]
+    [InlineData("<html><title>bad</title></html>")]
+    [InlineData("<not-an-atom-document />")]
+    public async Task Manual_search_returns_a_safe_empty_response_for_malformed_indexer_documents(string body)
+    {
+        var handler = new RecordingHandler(_ => new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(body, Encoding.UTF8, "application/xml") });
+        var databasePath = Path.Combine(Path.GetTempPath(), $"chordport-{Guid.NewGuid():N}.db");
+        using var factory = new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
+        {
+            builder.UseSetting("ConnectionStrings:ChordPort", $"Data Source={databasePath}");
+            builder.ConfigureServices(services =>
+            {
+                services.RemoveAll<IndexerSearchClient>();
+                services.AddSingleton(new IndexerSearchClient(new HttpClient(handler)));
+            });
+        });
+        using var client = factory.CreateClient();
+        var created = await client.PostAsJsonAsync("/api/indexers", new { name = "Primary", type = "Newznab", serverUrl = "https://news.example.test", enabled = true, priority = 1, categories = "3000", apiKey = "indexer-sentinel", clearApiKey = false });
+        created.EnsureSuccessStatusCode();
+
+        var response = await client.PostAsync("/api/manual-search?q=safe", null);
+        var payload = await response.Content.ReadAsStringAsync();
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Contains("\"results\":[]", payload);
+        Assert.Contains("No results found", payload);
+        Assert.DoesNotContain("XmlException", payload);
+        Assert.DoesNotContain("indexer-sentinel", payload);
+    }
+
+    [Fact]
+    public async Task Grab_rejects_oversized_declared_content_without_opening_the_body()
+    {
+        var content = new ProbeContent(512 * 1024 + 1, Array.Empty<byte>());
+        var handler = new RecordingHandler(_ => new HttpResponseMessage(HttpStatusCode.OK) { Content = content });
+
+        var result = await new IndexerSearchClient(new HttpClient(handler)).GrabNzbAsync(new IndexerConnection("Newznab", "https://news.example.test", "sentinel-key"), "id", CancellationToken.None);
+
+        Assert.Null(result);
+        Assert.False(content.StreamOpened);
+    }
+
+    [Fact]
+    public async Task Grab_rejects_chunked_body_past_limit_without_submitting_an_nzb()
+    {
+        var content = new ProbeContent(null, Array.Empty<byte>(), streamedLength: 512 * 1024 + 1);
+        var handler = new RecordingHandler(_ => new HttpResponseMessage(HttpStatusCode.OK) { Content = content });
+
+        var result = await new IndexerSearchClient(new HttpClient(handler)).GrabNzbAsync(new IndexerConnection("Newznab", "https://news.example.test", "sentinel-key"), "id", CancellationToken.None);
+
+        Assert.Null(result);
+        Assert.True(content.StreamOpened);
+        Assert.True(content.StreamedBytesRead > 512 * 1024);
+    }
+
     [Fact]
     public async Task Grab_accepts_only_fixed_get_path_and_nzb_xml()
     {
@@ -41,4 +101,51 @@ public sealed class ManualAcquisitionTests
         Assert.NotNull(nzb); Assert.Equal("t=get&id=provider%20id&apikey=sentinel-key", handler.Requests.Single().RequestUri!.Query.TrimStart('?'));
     }
     private sealed class RecordingHandler(Func<HttpRequestMessage,HttpResponseMessage> response) : HttpMessageHandler { public List<HttpRequestMessage> Requests { get; } = []; protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) { Requests.Add(request); return Task.FromResult(response(request)); } }
+    private sealed class ProbeContent : HttpContent
+    {
+        private readonly long? length;
+        private readonly byte[] bytes;
+        private readonly long? streamedLength;
+        public bool StreamOpened { get; private set; }
+        public long StreamedBytesRead { get; private set; }
+        public ProbeContent(long? length, byte[] bytes, long? streamedLength = null)
+        {
+            this.length = length;
+            this.bytes = bytes;
+            this.streamedLength = streamedLength;
+            Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/xml");
+        }
+        protected override bool TryComputeLength(out long value) { value = length ?? 0; return length.HasValue; }
+        protected override Task SerializeToStreamAsync(Stream stream, TransportContext? context) => stream.WriteAsync(bytes).AsTask();
+        protected override Task<Stream> CreateContentReadStreamAsync()
+        {
+            StreamOpened = true;
+            return Task.FromResult<Stream>(streamedLength is long size
+                ? new GeneratedStream(size, bytesRead => StreamedBytesRead += bytesRead)
+                : new MemoryStream(bytes, writable: false));
+        }
+    }
+    private sealed class GeneratedStream(long length, Action<int> recorded) : Stream
+    {
+        private long remaining = length;
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+        public override int Read(byte[] buffer, int offset, int count) => Read(buffer.AsSpan(offset, count));
+        public override int Read(Span<byte> buffer)
+        {
+            var read = (int)Math.Min(buffer.Length, remaining);
+            buffer[..read].Fill((byte)'x');
+            remaining -= read;
+            recorded(read);
+            return read;
+        }
+        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default) => ValueTask.FromResult(Read(buffer.Span));
+        public override void Flush() => throw new NotSupportedException();
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+    }
 }

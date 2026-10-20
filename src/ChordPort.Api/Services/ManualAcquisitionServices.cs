@@ -50,7 +50,7 @@ public sealed class IndexerSearchClient(HttpClient client)
             await using var stream = await response.Content.ReadAsStreamAsync(token);
             return ParseAtom(stream);
         }
-        catch (Exception ex) when (ex is HttpRequestException or IOException or TaskCanceledException or OperationCanceledException) { return []; }
+        catch (Exception ex) when (ex is HttpRequestException or IOException or XmlException or FormatException or TaskCanceledException or OperationCanceledException) { return []; }
     }
     public async Task<byte[]?> GrabNzbAsync(IndexerConnection connection, string resultId, CancellationToken token)
     {
@@ -59,10 +59,20 @@ public sealed class IndexerSearchClient(HttpClient client)
         {
             var uri = ApiUri(connection.ServerUrl, $"t=get&id={Uri.EscapeDataString(resultId)}&apikey={Uri.EscapeDataString(connection.ApiKey)}");
             using var response = await client.GetAsync(uri, HttpCompletionOption.ResponseHeadersRead, token);
-            if (!response.IsSuccessStatusCode || !IsXml(response.Content.Headers.ContentType?.MediaType)) return null;
+            if (!response.IsSuccessStatusCode || !IsXml(response.Content.Headers.ContentType?.MediaType) || response.Content.Headers.ContentLength is > MaxBytes) return null;
             await using var input = await response.Content.ReadAsStreamAsync(token);
-            using var bounded = new MemoryStream(); await input.CopyToAsync(bounded, token);
-            if (bounded.Length is 0 or > MaxBytes) return null;
+            using var bounded = new MemoryStream(response.Content.Headers.ContentLength is long length ? (int)length : 0);
+            var buffer = new byte[81920];
+            var total = 0;
+            while (true)
+            {
+                var read = await input.ReadAsync(buffer, token);
+                if (read == 0) break;
+                if (read > MaxBytes - total) return null;
+                await bounded.WriteAsync(buffer.AsMemory(0, read), token);
+                total += read;
+            }
+            if (total == 0) return null;
             var bytes = bounded.ToArray(); if (!IsNzb(bytes)) return null; return bytes;
         }
         catch (Exception ex) when (ex is HttpRequestException or IOException or XmlException or TaskCanceledException or OperationCanceledException) { return null; }

@@ -11,20 +11,40 @@ public static class SabnzbdEndpointValidator
         if (!Uri.TryCreate(value?.Trim(), UriKind.Absolute, out var uri) || (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps) ||
             !string.IsNullOrEmpty(uri.UserInfo) || !string.IsNullOrEmpty(uri.Query) || !string.IsNullOrEmpty(uri.Fragment) || (uri.AbsolutePath != "/" && uri.AbsolutePath.Length != 0))
             return new(false, "SABnzbd must use a local or private-network HTTP(S) server address without a path.");
-        if (string.Equals(uri.Host, "localhost", StringComparison.OrdinalIgnoreCase)) return new(true, null);
-        if (!IPAddress.TryParse(uri.Host, out var address) || !IsLocalOrPrivate(address))
+        if (!IPAddress.TryParse(uri.Host, out var address))
+        {
+            if (!string.Equals(uri.Host, "localhost", StringComparison.OrdinalIgnoreCase))
+                return new(false, "SABnzbd must use a loopback or private-network address.");
+        }
+        else if (!SabnzbdAddressPolicy.IsAllowed(address))
             return new(false, "SABnzbd must use a loopback or private-network address.");
         return new(true, null);
     }
+}
 
-    private static bool IsLocalOrPrivate(IPAddress address)
+public static class SabnzbdAddressPolicy
+{
+    public static bool IsAllowed(IPAddress address) => IndexerAddressPolicy.IsUserLocalHttpAddress(address);
+}
+
+public static class SabnzbdHttpHandlerFactory
+{
+    public static HttpMessageHandler Create() => new SocketsHttpHandler
     {
-        if (IPAddress.IsLoopback(address)) return true;
-        var bytes = address.GetAddressBytes();
-        if (address.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork)
-            return bytes[0] == 10 || (bytes[0] == 172 && bytes[1] is >= 16 and <= 31) || (bytes[0] == 192 && bytes[1] == 168);
-        return address.AddressFamily == System.Net.Sockets.AddressFamily.InterNetworkV6 && (bytes[0] & 0xfe) == 0xfc;
-    }
+        AllowAutoRedirect = false,
+        UseProxy = false,
+        ConnectCallback = async (context, cancellationToken) =>
+        {
+            var host = context.DnsEndPoint.Host;
+            var addresses = IPAddress.TryParse(host, out var literal) ? [literal] : await Dns.GetHostAddressesAsync(host, cancellationToken);
+            if (addresses.Length == 0 || !addresses.All(SabnzbdAddressPolicy.IsAllowed))
+                throw new HttpRequestException("Unsafe SABnzbd endpoint.");
+            var address = addresses[0];
+            var socket = new System.Net.Sockets.Socket(address.AddressFamily, System.Net.Sockets.SocketType.Stream, System.Net.Sockets.ProtocolType.Tcp);
+            try { await socket.ConnectAsync(new IPEndPoint(address, context.DnsEndPoint.Port), cancellationToken); return new System.Net.Sockets.NetworkStream(socket, ownsSocket: true); }
+            catch { socket.Dispose(); throw; }
+        }
+    };
 }
 
 public sealed class SabnzbdClient(HttpClient client)

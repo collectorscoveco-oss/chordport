@@ -4,6 +4,7 @@ using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.Http;
+using System.Net.Sockets;
 using System.Text;
 using System.Threading;
 using ChordPort.Api.Domain;
@@ -61,6 +62,66 @@ public sealed class SabnzbdClientTests
         Assert.Equal("SABnzbd returned an unexpected response.", malformedResult.Message);
         Assert.Equal("Could not connect to SABnzbd. Check the local address and try again.", offlineResult.Message);
         Assert.DoesNotContain("secret-key", offlineResult.Message);
+    }
+
+    [Fact]
+    public async Task Sab_client_does_not_follow_redirects_or_return_secrets()
+    {
+        const string sentinel = "sab-redirect-sentinel";
+        var handler = new RecordingHandler(_ => new HttpResponseMessage(HttpStatusCode.TemporaryRedirect) { Headers = { Location = new Uri("http://attacker.invalid/steal") } });
+        var result = await new SabnzbdClient(new HttpClient(handler)).AddFileAsync(new SabnzbdSettings(true, "http://127.0.0.1:8080", "music", sentinel), Encoding.UTF8.GetBytes("<nzb />"), "safe", CancellationToken.None);
+
+        Assert.False(result.Submitted);
+        Assert.Single(handler.Requests);
+        Assert.DoesNotContain(sentinel, result.Message);
+        Assert.DoesNotContain(sentinel, System.Text.Json.JsonSerializer.Serialize(result));
+    }
+
+    [Theory]
+    [InlineData(307)]
+    [InlineData(308)]
+    public async Task Hardened_handler_does_not_contact_redirect_target_or_expose_secrets(int redirectStatus)
+    {
+        const string sentinel = "sab-runtime-redirect-sentinel";
+        using var source = new TcpListener(IPAddress.Loopback, 0);
+        using var attacker = new TcpListener(IPAddress.Loopback, 0);
+        source.Start(); attacker.Start();
+        var attackerPort = ((IPEndPoint)attacker.LocalEndpoint).Port;
+        var served = Task.Run(async () =>
+        {
+            using var connection = await source.AcceptTcpClientAsync();
+            await using var stream = connection.GetStream();
+            using var reader = new StreamReader(stream, Encoding.ASCII, leaveOpen: true);
+            var request = new StringBuilder();
+            string? line;
+            while (!string.IsNullOrEmpty(line = await reader.ReadLineAsync())) request.AppendLine(line);
+            var redirect = $"HTTP/1.1 {redirectStatus} Redirect\r\nLocation: http://127.0.0.1:{attackerPort}/steal\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            await stream.WriteAsync(Encoding.ASCII.GetBytes(redirect));
+            return request.ToString();
+        });
+        using var http = new HttpClient(SabnzbdHttpHandlerFactory.Create());
+        var port = ((IPEndPoint)source.LocalEndpoint).Port;
+        var result = await new SabnzbdClient(http).AddFileAsync(new SabnzbdSettings(true, $"http://localhost:{port}", "music", sentinel), Encoding.UTF8.GetBytes("<nzb />"), "safe", CancellationToken.None);
+        var request = await served;
+        var attackerAccept = attacker.AcceptTcpClientAsync();
+        var contacted = await Task.WhenAny(attackerAccept, Task.Delay(250));
+
+        Assert.False(result.Submitted);
+        Assert.Contains(sentinel, request);
+        Assert.DoesNotContain(sentinel, result.Message);
+        Assert.NotSame(attackerAccept, contacted);
+    }
+
+    [Theory]
+    [InlineData("127.0.0.1", true)]
+    [InlineData("10.0.0.1", true)]
+    [InlineData("192.168.1.1", true)]
+    [InlineData("fc00::1", true)]
+    [InlineData("8.8.8.8", false)]
+    [InlineData("169.254.169.254", false)]
+    public void Sab_connection_policy_allows_only_loopback_or_private_resolution(string address, bool allowed)
+    {
+        Assert.Equal(allowed, SabnzbdAddressPolicy.IsAllowed(IPAddress.Parse(address)));
     }
 
     [Fact]
