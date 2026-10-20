@@ -29,6 +29,42 @@ public static class SabnzbdEndpointValidator
 
 public sealed class SabnzbdClient(HttpClient client)
 {
+    public async Task<SabnzbdSubmitResponse> AddFileAsync(SabnzbdSettings settings, byte[] nzb, string title, CancellationToken cancellationToken)
+    {
+        if (!settings.Enabled || !SabnzbdEndpointValidator.Validate(settings.ServerUrl).IsValid || string.IsNullOrWhiteSpace(settings.ApiKey) || nzb.Length is 0 or > 512 * 1024) return new(false, null, "SABnzbd settings are unavailable.");
+        try
+        {
+            var uri = new UriBuilder(settings.ServerUrl.Trim()) { Path = "api", Query = $"mode=addfile&output=json&apikey={Uri.EscapeDataString(settings.ApiKey)}&cat={Uri.EscapeDataString(settings.Category)}" }.Uri;
+            using var form = new MultipartFormDataContent();
+            form.Add(new ByteArrayContent(nzb), "nzbfile", SanitizeFileName(title) + ".nzb");
+            using var response = await client.PostAsync(uri, form, cancellationToken);
+            if (!response.IsSuccessStatusCode) return new(false, null, "SABnzbd did not accept the NZB.");
+            using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync(cancellationToken));
+            var root = document.RootElement;
+            var id = root.TryGetProperty("nzo_ids", out var ids) && ids.ValueKind == JsonValueKind.Array ? ids.EnumerateArray().FirstOrDefault().GetString() : null;
+            return !string.IsNullOrWhiteSpace(id) ? new(true, id, "Submitted to SABnzbd.") : new(false, null, "SABnzbd returned an unexpected response.");
+        }
+        catch (JsonException) { return new(false, null, "SABnzbd returned an unexpected response."); }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or OperationCanceledException) { return new(false, null, "Could not submit to SABnzbd."); }
+    }
+    public async Task<IReadOnlyDictionary<string, string>> GetKnownJobStatusesAsync(SabnzbdSettings settings, IReadOnlyCollection<string> knownIds, CancellationToken cancellationToken)
+    {
+        var found = new Dictionary<string, string>(); if (!settings.Enabled || knownIds.Count == 0 || !SabnzbdEndpointValidator.Validate(settings.ServerUrl).IsValid || string.IsNullOrWhiteSpace(settings.ApiKey)) return found;
+        foreach (var mode in new[] { "queue", "history" }) try
+        {
+            var uri = new UriBuilder(settings.ServerUrl.Trim()) { Path = "api", Query = $"mode={mode}&output=json&apikey={Uri.EscapeDataString(settings.ApiKey)}" }.Uri;
+            using var response = await client.GetAsync(uri, cancellationToken); if (!response.IsSuccessStatusCode) continue;
+            using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync(cancellationToken));
+            Scan(document.RootElement, knownIds, found);
+        }
+        catch (Exception ex) when (ex is JsonException or HttpRequestException or TaskCanceledException or OperationCanceledException) { }
+        return found;
+    }
+    private static void Scan(JsonElement value, IReadOnlyCollection<string> known, IDictionary<string,string> found)
+    { if (value.ValueKind == JsonValueKind.Object) { var id = value.TryGetProperty("nzo_id", out var nzo) ? nzo.GetString() : value.TryGetProperty("nzo_ids", out var ids) && ids.ValueKind == JsonValueKind.String ? ids.GetString() : null; if (!string.IsNullOrWhiteSpace(id) && known.Contains(id)) { var status = value.TryGetProperty("status", out var s) ? s.GetString() : value.TryGetProperty("state", out var st) ? st.GetString() : "queued"; found[id] = MapStatus(status); } foreach (var property in value.EnumerateObject()) Scan(property.Value, known, found); } else if (value.ValueKind == JsonValueKind.Array) foreach (var item in value.EnumerateArray()) Scan(item, known, found); }
+    private static string MapStatus(string? status) => status?.ToLowerInvariant() switch { var s when s?.Contains("fail") == true => "failed", var s when s?.Contains("complete") == true => "completed", var s when s?.Contains("download") == true => "downloading", _ => "queued" };
+    private static string SanitizeFileName(string title) => string.Concat(title.Where(ch => char.IsLetterOrDigit(ch) || ch is ' ' or '-' or '_' or '.')).Trim()[..Math.Min(120, Math.Max(1, string.Concat(title.Where(ch => char.IsLetterOrDigit(ch) || ch is ' ' or '-' or '_' or '.')).Trim().Length))];
+
     public async Task<SabnzbdTestResponse> TestConnectionAsync(SabnzbdSettings settings, CancellationToken cancellationToken)
     {
         var endpoint = SabnzbdEndpointValidator.Validate(settings.ServerUrl);

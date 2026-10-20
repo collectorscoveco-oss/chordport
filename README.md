@@ -1,6 +1,6 @@
 # ChordPort
 
-ChordPort is a Windows-first, cross-platform local music request desk. V0.1.5 is a safe metadata/request manager: it ships with a small local starter catalog, a request queue, local settings, optional local SABnzbd and indexer capability testing, system health, and a Windows-only tray controller. It does **not** search indexers, poll RSS, acquire music, send downloads, manage accounts, or expose remote access.
+ChordPort is a Windows-first, cross-platform local music request desk. V0.1.6 is a safe metadata/request manager: it ships with a small local starter catalog, a request queue, local settings, optional local SABnzbd and indexer capability testing, system health, and a Windows-only tray controller. It does **not** search indexers, poll RSS, acquire music, send downloads, manage accounts, or expose remote access.
 
 > Only use music and metadata from sources you are authorized to use. ChordPort never alters files in V0.1.
 
@@ -35,22 +35,22 @@ Use a root/base URL only—no userinfo, path, query, or fragment. Remote indexer
 
 ## Update checks
 
-The System screen can check whether a newer stable ChordPort release is available. The browser calls only ChordPort's local backend; the backend makes the GitHub `releases/latest` request, accepts only the project's HTTPS GitHub release-tag URL, compares stable semantic versions, and caches the result briefly. It never downloads, installs, applies, or restarts an update. This release reports current version `0.1.5`.
+The System screen can check whether a newer stable ChordPort release is available. The browser calls only ChordPort's local backend; the backend makes the GitHub `releases/latest` request, accepts only the project's HTTPS GitHub release-tag URL, compares stable semantic versions, and caches the result briefly. It never downloads, installs, applies, or restarts an update. This release reports current version `0.1.6`.
 
 ## Windows portable tester package
 
 A Windows x64 package is self-contained: testers do **not** need a .NET installation. From the repository root in PowerShell (PowerShell 7 is supported on Windows, Linux, and macOS), build it with:
 
 ```powershell
-./scripts/package-windows.ps1 -Version 0.1.5
+./scripts/package-windows.ps1 -Version 0.1.6
 ```
 
 The command publishes `win-x64` with `--self-contained true`, builds the React UI, and writes only ignored output beneath `artifacts/`:
 
-- `artifacts/ChordPort-0.1.5-win-x64/` — unpacked tester distribution (API and UI at its root; the independent self-contained tray helper is in `tray/`)
-- `artifacts/ChordPort-0.1.5-win-x64.zip` — versioned portable ZIP
+- `artifacts/ChordPort-0.1.6-win-x64/` — unpacked tester distribution (API and UI at its root; the independent self-contained tray helper is in `tray/`)
+- `artifacts/ChordPort-0.1.6-win-x64.zip` — versioned portable ZIP
 
-Extract the ZIP to a user-writable folder (for example, Downloads), open the extracted `ChordPort-0.1.5-win-x64` folder, and double-click `Start-ChordPort.cmd`. The launcher refuses to start if any service is already listening on `http://127.0.0.1:5098`; close that service and retry. If the port is free, it starts `ChordPort.Api.exe` only on `http://127.0.0.1:5098`, waits for `GET /api/health` to return successfully, then starts the Windows-only tray controller and opens the browser. Its console shows diagnostics and remains open when startup fails.
+Extract the ZIP to a user-writable folder (for example, Downloads), open the extracted `ChordPort-0.1.6-win-x64` folder, and double-click `Start-ChordPort.cmd`. The launcher refuses to start if any service is already listening on `http://127.0.0.1:5098`; close that service and retry. If the port is free, it starts `ChordPort.Api.exe` only on `http://127.0.0.1:5098`, waits for `GET /api/health` to return successfully, then starts the Windows-only tray controller and opens the browser. Its console shows diagnostics and remains open when startup fails.
 
 On Windows, one ChordPort icon appears in the notification area while the API is healthy. Click it or choose **Open ChordPort** to open the local browser UI. Choose **Exit ChordPort** to request a graceful local API stop and remove the tray icon. The tray controller uses a per-user single-instance mutex; a repeat helper launch opens the existing UI instead of creating another icon. It verifies the health response identifies ChordPort before sending its bounded local shutdown request, and removes itself if the local API stops. The shutdown command is only accepted from a loopback peer.
 
@@ -118,3 +118,31 @@ Known limitations: the local catalog is still a small V0.1 starter set; MusicBra
 - `POST /api/system/shutdown` — loopback-only graceful stop used by the Windows tray controller.
 
 Invalid inputs return small client-readable JSON error bodies and no internal details.
+
+## v0.1.6 manual indexer acquisition
+
+ChordPort v0.1.6 supports an explicit, manual path for media you are authorized to obtain:
+
+1. Configure and capability-test Newznab or Torznab indexers in **Settings → Indexers** and configure SABnzbd under **Settings → Download Clients**.
+2. On **Music**, enter a term and choose **Search indexers**. This is separate from local/MusicBrainz metadata search and only queries enabled indexers when pressed, in priority order.
+3. Inspect the returned source/indexer metadata and use **Send to SABnzbd** for one selected result. The confirmation identifies the configured SAB category.
+4. Use **Activity → Refresh activity** to query SABnzbd queue/history for only job IDs submitted by ChordPort.
+
+Safety boundaries: searches and grabs are server-side only; no browser contacts indexers. ChordPort accepts only temporary opaque candidate IDs that it issued, uses a fixed Newznab/Torznab `api` search/get protocol path, prevents re-use after submission, rejects DTD/entity XML and invalid/oversized NZB payloads, and sends the file with SABnzbd's `addfile` multipart API. API keys, indexer URLs, NZB data, and client-supplied download URLs/categories/destinations are not exposed through this flow. Key-bearing HTTP clients have default logging removed.
+
+Activity is stored locally without API keys or NZB contents. Refresh maps known submitted jobs to queued, downloading, completed, or failed; it does not inspect or control other SABnzbd jobs. **Completed downloads are not imported by this release.** ChordPort does not move, rename, tag, copy, or alter completed media; manual import is next.
+
+### Local test and packaging
+
+Run these with no live indexer or SABnzbd credentials:
+
+```powershell
+dotnet test ChordPort.sln -c Release
+dotnet build ChordPort.sln -c Release /warnaserror
+npm ci --prefix frontend
+npm test --prefix frontend
+npm run build --prefix frontend
+dotnet publish src/ChordPort.Api/ChordPort.Api.csproj -c Release -r win-x64 --self-contained true -o artifacts/ChordPort-0.1.6-win-x64
+```
+
+Package the published API, generated local frontend, and Windows tray executable into `artifacts/ChordPort-0.1.6-win-x64.zip`; inspect its static files and calculate a SHA-256 before distribution. Do not publish or push from this controlled local-testing phase.

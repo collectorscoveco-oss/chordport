@@ -35,11 +35,13 @@ builder.Services.AddHttpClient<IMusicMetadataProvider, MusicBrainzClient>((sp, c
 builder.Services.AddSingleton<SabnzbdSecretProtector>();
 builder.Services.AddHttpClient<SabnzbdClient>(client => client.Timeout = TimeSpan.FromSeconds(5)).RemoveAllLoggers();
 builder.Services.AddSingleton<IndexerSecretProtector>();
-builder.Services.AddHttpClient<IndexerClient>(client => { client.Timeout = TimeSpan.FromSeconds(5); client.DefaultRequestHeaders.UserAgent.ParseAdd("ChordPort/0.1.5 (local indexer capability test)"); }).ConfigurePrimaryHttpMessageHandler(IndexerHttpHandlerFactory.Create).RemoveAllLoggers();
-builder.Services.AddSingleton(new UpdateCheckOptions { CurrentVersion = "0.1.5" });
+builder.Services.AddHttpClient<IndexerClient>(client => { client.Timeout = TimeSpan.FromSeconds(5); client.DefaultRequestHeaders.UserAgent.ParseAdd("ChordPort/0.1.6 (local indexer capability test)"); }).ConfigurePrimaryHttpMessageHandler(IndexerHttpHandlerFactory.Create).RemoveAllLoggers();
+builder.Services.AddHttpClient<IndexerSearchClient>(client => { client.Timeout = TimeSpan.FromSeconds(10); client.DefaultRequestHeaders.UserAgent.ParseAdd("ChordPort/0.1.6 (manual authorized music search)"); }).ConfigurePrimaryHttpMessageHandler(IndexerHttpHandlerFactory.Create).RemoveAllLoggers();
+builder.Services.AddSingleton<CandidateStore>();
+builder.Services.AddSingleton(new UpdateCheckOptions { CurrentVersion = "0.1.6" });
 builder.Services.AddHttpClient<UpdateCheckClient>(client =>
 {
-    client.DefaultRequestHeaders.UserAgent.ParseAdd("ChordPort/0.1.5 (local update check)");
+    client.DefaultRequestHeaders.UserAgent.ParseAdd("ChordPort/0.1.6 (local update check)");
     client.Timeout = TimeSpan.FromSeconds(5);
 });
 builder.Services.AddSingleton<HealthService>();
@@ -55,6 +57,7 @@ using (var scope = app.Services.CreateScope())
     EnsureColumn(db, SettingsColumn.SabnzbdCategory);
     EnsureColumn(db, SettingsColumn.SabnzbdProtectedApiKey);
     db.Database.ExecuteSqlRaw("CREATE TABLE IF NOT EXISTS Indexers (Id TEXT NOT NULL CONSTRAINT PK_Indexers PRIMARY KEY, Name TEXT NOT NULL, Type TEXT NOT NULL, ServerUrl TEXT NOT NULL, Enabled INTEGER NOT NULL, Priority INTEGER NOT NULL, Categories TEXT NULL, ProtectedApiKey TEXT NULL, LastTestedAt TEXT NULL, LastTestStatus TEXT NULL, LastTestMessage TEXT NULL, CapabilitySummary TEXT NULL)");
+    db.Database.ExecuteSqlRaw("CREATE TABLE IF NOT EXISTS Activities (Id TEXT NOT NULL CONSTRAINT PK_Activities PRIMARY KEY, Title TEXT NOT NULL, Indexer TEXT NOT NULL, SabJobId TEXT NULL, Status TEXT NOT NULL, Message TEXT NOT NULL, SubmittedAt TEXT NOT NULL, UpdatedAt TEXT NULL)");
 }
 
 app.MapGet("/api/health", (HealthService health) => Results.Ok(health.Get()));
@@ -151,6 +154,39 @@ app.MapPost("/api/indexers/{id}/test", async (string id, ChordPortDbContext db, 
     }
     catch (CryptographicException) { return Results.BadRequest(new { error = "The saved indexer key is unavailable. Save it again before testing." }); }
 });
+app.MapPost("/api/manual-search", async (string? q, ChordPortDbContext db, IndexerSecretProtector secrets, IndexerSearchClient indexers, CandidateStore candidates, CancellationToken cancellationToken) =>
+{
+    if (string.IsNullOrWhiteSpace(q) || q.Trim().Length > 200) return Results.BadRequest(new { error = "A search query of 1 to 200 characters is required." });
+    var output = new List<ManualSearchResult>();
+    foreach (var entity in await db.Indexers.Where(x => x.Enabled && x.ProtectedApiKey != null).OrderBy(x => x.Priority).ThenBy(x => x.Name).ToListAsync())
+    {
+        try { var hits = await indexers.SearchAsync(new IndexerConnection(entity.Type, entity.ServerUrl, secrets.Unprotect(entity.ProtectedApiKey!)), string.IsNullOrWhiteSpace(entity.Categories) ? "3000" : entity.Categories!, q, cancellationToken); output.AddRange(hits.Select(hit => { var c = candidates.Issue(entity.Id, entity.Name, hit); return new ManualSearchResult(c.Id, c.Title, c.SizeBytes, c.PublishedAt, c.Seeders, c.IndexerName); })); }
+        catch (CryptographicException) { }
+    }
+    return Results.Ok(new ManualSearchResponse(output.Take(100).ToArray(), output.Count == 0 ? "No results found from configured enabled indexers." : null));
+});
+app.MapPost("/api/manual-submit", async (SubmitCandidateRequest request, ChordPortDbContext db, CandidateStore candidates, IndexerSecretProtector indexerSecrets, SabnzbdSecretProtector sabSecrets, IndexerSearchClient indexers, SabnzbdClient sab, CancellationToken cancellationToken) =>
+{
+    if (!candidates.TryConsume(request.CandidateId, out var candidate)) return Results.BadRequest(new { error = "This result is unavailable, expired, or was already submitted. Search again." });
+    var indexer = await db.Indexers.FindAsync(candidate.IndexerId); var settings = await GetOrCreateSettings(db);
+    if (indexer is null || !indexer.Enabled || string.IsNullOrWhiteSpace(indexer.ProtectedApiKey) || !settings.SabnzbdEnabled || string.IsNullOrWhiteSpace(settings.SabnzbdProtectedApiKey)) return Results.BadRequest(new { error = "The selected indexer or SABnzbd configuration is no longer available." });
+    try
+    {
+        var nzb = await indexers.GrabNzbAsync(new IndexerConnection(indexer.Type, indexer.ServerUrl, indexerSecrets.Unprotect(indexer.ProtectedApiKey)), candidate.ResultId, cancellationToken);
+        if (nzb is null) return Results.BadRequest(new { error = "The indexer did not return a valid NZB file." });
+        var submitted = await sab.AddFileAsync(new SabnzbdSettings(settings.SabnzbdEnabled, settings.SabnzbdServerUrl, settings.SabnzbdCategory, sabSecrets.Unprotect(settings.SabnzbdProtectedApiKey)), nzb, candidate.Title, cancellationToken);
+        if (!submitted.Submitted) return Results.BadRequest(new { error = submitted.Message });
+        var activity = new ActivityEntity { Id = Guid.NewGuid().ToString("N"), Title = candidate.Title, Indexer = candidate.IndexerName, SabJobId = submitted.JobId, Status = "queued", Message = "Submitted to SABnzbd. Completed downloads are not imported by this release.", SubmittedAt = DateTimeOffset.UtcNow }; db.Activities.Add(activity); await db.SaveChangesAsync(); return Results.Ok(ToActivity(activity));
+    }
+    catch (CryptographicException) { return Results.BadRequest(new { error = "Saved credentials are unavailable. Save them again before submitting." }); }
+});
+app.MapGet("/api/activity", async (ChordPortDbContext db) => Results.Ok((await db.Activities.OrderByDescending(x => x.SubmittedAt).ToListAsync()).Select(ToActivity)));
+app.MapPost("/api/activity/refresh", async (ChordPortDbContext db, SabnzbdSecretProtector secrets, SabnzbdClient sab, CancellationToken cancellationToken) =>
+{
+    var settings = await GetOrCreateSettings(db); var activities = await db.Activities.Where(x => x.SabJobId != null).ToListAsync(); if (!settings.SabnzbdEnabled || string.IsNullOrWhiteSpace(settings.SabnzbdProtectedApiKey)) return Results.BadRequest(new { error = "Enable SABnzbd and save an API key before refreshing activity." });
+    try { var statuses = await sab.GetKnownJobStatusesAsync(new SabnzbdSettings(settings.SabnzbdEnabled, settings.SabnzbdServerUrl, settings.SabnzbdCategory, secrets.Unprotect(settings.SabnzbdProtectedApiKey)), activities.Select(x => x.SabJobId!).ToArray(), cancellationToken); foreach (var activity in activities.Where(x => statuses.TryGetValue(x.SabJobId!, out _))) { activity.Status = statuses[activity.SabJobId!]; activity.Message = activity.Status == "completed" ? "Completed in SABnzbd. Manual import is next." : $"SABnzbd status: {activity.Status}."; activity.UpdatedAt = DateTimeOffset.UtcNow; } await db.SaveChangesAsync(); return Results.Ok(activities.OrderByDescending(x => x.SubmittedAt).Select(ToActivity)); }
+    catch (CryptographicException) { return Results.BadRequest(new { error = "The saved SABnzbd key is unavailable. Save it again before refreshing." }); }
+});
 app.MapGet("/api/system/update", async (UpdateCheckClient updates, CancellationToken cancellationToken) => Results.Ok(await updates.CheckAsync(cancellationToken)));
 app.UseDefaultFiles(); app.UseStaticFiles();
 app.MapFallbackToFile("index.html");
@@ -210,4 +246,5 @@ public partial class Program
     private static IndexerResponse ToIndexerResponse(IndexerEntity entity) => IndexerMapper.ToResponse(ToStoredIndexer(entity));
     private static StoredSabnzbdSettings ToStoredSettings(SettingsEntity entity) => new(entity.SabnzbdEnabled, entity.SabnzbdServerUrl, entity.SabnzbdCategory, entity.SabnzbdProtectedApiKey);
     private static SettingsResponse ToSettingsResponse(SettingsEntity entity) => new(entity.LibraryRoot, entity.ImportMode, entity.MetadataProvider, SabnzbdSettingsMapper.ToResponse(ToStoredSettings(entity)));
+    private static ActivityResponse ToActivity(ActivityEntity entity) => new(entity.Id, entity.Title, entity.Indexer, entity.SabJobId, entity.Status, entity.Message, entity.SubmittedAt, entity.UpdatedAt);
 }

@@ -11,6 +11,7 @@ public sealed class SabnzbdSecretProtector(IDataProtectionProvider provider)
 
 public sealed record SabnzbdSettings(bool Enabled, string ServerUrl, string Category, string ApiKey);
 public sealed record SabnzbdTestResponse(bool Connected, string Message);
+public sealed record SabnzbdSubmitResponse(bool Submitted, string? JobId, string Message);
 public sealed record StoredSabnzbdSettings(bool Enabled, string ServerUrl, string Category, string? ProtectedApiKey);
 public sealed record SabnzbdSettingsInput(bool Enabled, string ServerUrl, string Category, string? ApiKey, bool ClearApiKey);
 public sealed record SabnzbdSettingsResponse(bool Enabled, string ServerUrl, string Category, bool HasApiKey, string Status);
