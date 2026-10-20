@@ -51,8 +51,43 @@ public sealed class ManualAcquisitionTests
         Assert.Equal(HttpStatusCode.Forbidden, rejected.StatusCode);
         Assert.Empty(handler.Requests);
         using var sameOrigin = new HttpRequestMessage(HttpMethod.Post, "/api/manual-search?q=safe");
-        sameOrigin.Headers.TryAddWithoutValidation("Origin", client.BaseAddress!.GetLeftPart(UriPartial.Authority));
+        sameOrigin.Headers.Host = "127.0.0.1:5098";
+        sameOrigin.Headers.TryAddWithoutValidation("Origin", "http://127.0.0.1:5098");
         var accepted = await client.SendAsync(sameOrigin);
+        Assert.Equal(HttpStatusCode.OK, accepted.StatusCode);
+        Assert.Single(handler.Requests);
+    }
+
+    [Fact]
+    public async Task Forged_host_and_matching_origin_are_rejected_before_manual_search_contacts_indexers_while_fixed_ui_origin_is_accepted()
+    {
+        var handler = new RecordingHandler(_ => new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("<rss><channel><item><title>Safe Album</title><guid>provider-id</guid></item></channel></rss>", Encoding.UTF8, "application/xml") });
+        var databasePath = Path.Combine(Path.GetTempPath(), $"chordport-{Guid.NewGuid():N}.db");
+        using var factory = new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
+        {
+            builder.UseSetting("ConnectionStrings:ChordPort", $"Data Source={databasePath}");
+            builder.ConfigureServices(services => { services.RemoveAll<IndexerSearchClient>(); services.AddSingleton(new IndexerSearchClient(new HttpClient(handler))); });
+        });
+        using var client = factory.CreateClient();
+        (await client.PostAsJsonAsync("/api/indexers", new { name = "Primary", type = "Newznab", serverUrl = "https://news.example.test", enabled = true, priority = 1, categories = "3000", apiKey = "indexer-sentinel", clearApiKey = false })).EnsureSuccessStatusCode();
+
+        using var forged = new HttpRequestMessage(HttpMethod.Post, "/api/manual-search?q=safe");
+        forged.Headers.Host = "evil.example:5098";
+        forged.Headers.TryAddWithoutValidation("Origin", "http://evil.example:5098");
+        forged.Headers.TryAddWithoutValidation("Sec-Fetch-Site", "same-origin");
+
+        var rejected = await client.SendAsync(forged);
+
+        Assert.Equal(HttpStatusCode.Forbidden, rejected.StatusCode);
+        Assert.Empty(handler.Requests);
+
+        using var allowed = new HttpRequestMessage(HttpMethod.Post, "/api/manual-search?q=safe");
+        allowed.Headers.Host = "127.0.0.1:5098";
+        allowed.Headers.TryAddWithoutValidation("Origin", "http://127.0.0.1:5098");
+        allowed.Headers.TryAddWithoutValidation("Sec-Fetch-Site", "same-origin");
+
+        var accepted = await client.SendAsync(allowed);
+
         Assert.Equal(HttpStatusCode.OK, accepted.StatusCode);
         Assert.Single(handler.Requests);
     }
