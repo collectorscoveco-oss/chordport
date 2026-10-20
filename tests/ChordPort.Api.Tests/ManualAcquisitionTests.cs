@@ -30,6 +30,87 @@ public sealed class ManualAcquisitionTests
         var store = new CandidateStore(); var candidate = store.Issue("indexer", "Primary", new IndexerSearchHit("provider", "Title", null, null, null));
         Assert.False(store.TryConsume("forged", out _)); Assert.True(store.TryConsume(candidate.Id, out var consumed)); Assert.Equal("provider", consumed.ResultId); Assert.False(store.TryConsume(candidate.Id, out _));
     }
+
+    [Fact]
+    public async Task Manual_search_rejects_foreign_form_origin_before_contacting_indexers_but_accepts_same_origin()
+    {
+        var handler = new RecordingHandler(_ => new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("<rss><channel><item><title>Safe Album</title><guid>provider-id</guid></item></channel></rss>", Encoding.UTF8, "application/xml") });
+        var databasePath = Path.Combine(Path.GetTempPath(), $"chordport-{Guid.NewGuid():N}.db");
+        using var factory = new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
+        {
+            builder.UseSetting("ConnectionStrings:ChordPort", $"Data Source={databasePath}");
+            builder.ConfigureServices(services => { services.RemoveAll<IndexerSearchClient>(); services.AddSingleton(new IndexerSearchClient(new HttpClient(handler))); });
+        });
+        using var client = factory.CreateClient();
+        (await client.PostAsJsonAsync("/api/indexers", new { name = "Primary", type = "Newznab", serverUrl = "https://news.example.test", enabled = true, priority = 1, categories = "3000", apiKey = "indexer-sentinel", clearApiKey = false })).EnsureSuccessStatusCode();
+        using var foreign = new HttpRequestMessage(HttpMethod.Post, "/api/manual-search?q=safe") { Content = new FormUrlEncodedContent([]) };
+        foreign.Headers.TryAddWithoutValidation("Origin", "https://attacker.example");
+
+        var rejected = await client.SendAsync(foreign);
+
+        Assert.Equal(HttpStatusCode.Forbidden, rejected.StatusCode);
+        Assert.Empty(handler.Requests);
+        using var sameOrigin = new HttpRequestMessage(HttpMethod.Post, "/api/manual-search?q=safe");
+        sameOrigin.Headers.TryAddWithoutValidation("Origin", client.BaseAddress!.GetLeftPart(UriPartial.Authority));
+        var accepted = await client.SendAsync(sameOrigin);
+        Assert.Equal(HttpStatusCode.OK, accepted.StatusCode);
+        Assert.Single(handler.Requests);
+    }
+
+    [Fact]
+    public async Task Foreign_origin_cannot_submit_a_candidate_to_sabnzbd()
+    {
+        var indexerHandler = new RecordingHandler(_ => throw new InvalidOperationException("Indexer must not be called."));
+        var sabHandler = new RecordingHandler(_ => throw new InvalidOperationException("SABnzbd must not be called."));
+        var candidates = new CandidateStore();
+        var candidate = candidates.Issue("indexer", "Primary", new IndexerSearchHit("provider-id", "Safe Album", null, null, null));
+        var databasePath = Path.Combine(Path.GetTempPath(), $"chordport-{Guid.NewGuid():N}.db");
+        using var factory = new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
+        {
+            builder.UseSetting("ConnectionStrings:ChordPort", $"Data Source={databasePath}");
+            builder.ConfigureServices(services =>
+            {
+                services.RemoveAll<CandidateStore>(); services.AddSingleton(candidates);
+                services.RemoveAll<IndexerSearchClient>(); services.AddSingleton(new IndexerSearchClient(new HttpClient(indexerHandler)));
+                services.RemoveAll<SabnzbdClient>(); services.AddSingleton(new SabnzbdClient(new HttpClient(sabHandler)));
+            });
+        });
+        using var client = factory.CreateClient();
+        using var request = new HttpRequestMessage(HttpMethod.Post, "/api/manual-submit") { Content = JsonContent.Create(new { candidateId = candidate.Id }) };
+        request.Headers.TryAddWithoutValidation("Origin", "https://attacker.example");
+
+        var response = await client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+        Assert.Empty(indexerHandler.Requests);
+        Assert.Empty(sabHandler.Requests);
+        Assert.True(candidates.TryConsume(candidate.Id, out _));
+    }
+
+    [Fact]
+    public async Task Manual_search_issues_only_returned_candidates_when_multi_indexer_results_exceed_capacity()
+    {
+        var handler = new RecordingHandler(request => new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(SearchXml(request.RequestUri!.Host), Encoding.UTF8, "application/xml") });
+        var candidates = new CandidateStore();
+        var databasePath = Path.Combine(Path.GetTempPath(), $"chordport-{Guid.NewGuid():N}.db");
+        using var factory = new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
+        {
+            builder.UseSetting("ConnectionStrings:ChordPort", $"Data Source={databasePath}");
+            builder.ConfigureServices(services => { services.RemoveAll<IndexerSearchClient>(); services.AddSingleton(new IndexerSearchClient(new HttpClient(handler))); services.RemoveAll<CandidateStore>(); services.AddSingleton(candidates); });
+        });
+        using var client = factory.CreateClient();
+        for (var index = 0; index < 5; index++)
+            (await client.PostAsJsonAsync("/api/indexers", new { name = $"Indexer {index}", type = "Newznab", serverUrl = $"https://indexer-{index}.example.test", enabled = true, priority = index, categories = "3000", apiKey = "indexer-sentinel", clearApiKey = false })).EnsureSuccessStatusCode();
+
+        var response = await client.PostAsync("/api/manual-search?q=safe", null);
+        var payload = await response.Content.ReadFromJsonAsync<ManualSearchResponse>();
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.NotNull(payload);
+        var results = payload!.Results;
+        Assert.Equal(100, results.Count);
+        Assert.All(results, result => Assert.True(candidates.TryConsume(result.CandidateId, out _)));
+    }
     [Theory]
     [InlineData("<!DOCTYPE rss [<!ENTITY x 'bad'>]><rss><channel><item><title>&x;</title><guid>x</guid></item></channel></rss>")]
     [InlineData("<html><title>bad</title></html>")]
@@ -101,6 +182,7 @@ public sealed class ManualAcquisitionTests
         Assert.NotNull(nzb); Assert.Equal("t=get&id=provider%20id&apikey=sentinel-key", handler.Requests.Single().RequestUri!.Query.TrimStart('?'));
     }
     private sealed class RecordingHandler(Func<HttpRequestMessage,HttpResponseMessage> response) : HttpMessageHandler { public List<HttpRequestMessage> Requests { get; } = []; protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) { Requests.Add(request); return Task.FromResult(response(request)); } }
+    private static string SearchXml(string prefix) => $"<rss><channel>{string.Concat(Enumerable.Range(0, 50).Select(index => $"<item><title>{prefix} {index}</title><guid>{prefix}-{index}</guid></item>"))}</channel></rss>";
     private sealed class ProbeContent : HttpContent
     {
         private readonly long? length;

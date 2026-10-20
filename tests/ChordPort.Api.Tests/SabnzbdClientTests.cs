@@ -65,6 +65,47 @@ public sealed class SabnzbdClientTests
     }
 
     [Fact]
+    public async Task Add_file_rejects_oversized_declared_json_without_opening_the_body()
+    {
+        var content = new ProbeJsonContent(512 * 1024 + 1);
+        var handler = new RecordingHandler(_ => new HttpResponseMessage(HttpStatusCode.OK) { Content = content });
+
+        var result = await new SabnzbdClient(new HttpClient(handler)).AddFileAsync(new SabnzbdSettings(true, "http://127.0.0.1:8080", "music", "secret-key"), Encoding.UTF8.GetBytes("<nzb />"), "safe", CancellationToken.None);
+
+        Assert.False(result.Submitted);
+        Assert.Equal("SABnzbd returned an unexpected response.", result.Message);
+        Assert.False(content.StreamOpened);
+    }
+
+    [Fact]
+    public async Task Test_connection_rejects_oversized_chunked_json()
+    {
+        var content = new ProbeJsonContent(null, streamedLength: 512 * 1024 + 1);
+        var handler = new RecordingHandler(_ => new HttpResponseMessage(HttpStatusCode.OK) { Content = content });
+
+        var result = await new SabnzbdClient(new HttpClient(handler)).TestConnectionAsync(new SabnzbdSettings(true, "http://127.0.0.1:8080", "music", "secret-key"), CancellationToken.None);
+
+        Assert.False(result.Connected);
+        Assert.Equal("SABnzbd returned an unexpected response.", result.Message);
+        Assert.True(content.StreamedBytesRead > 512 * 1024);
+    }
+
+    [Fact]
+    public async Task Activity_status_refresh_skips_oversized_declared_and_chunked_json()
+    {
+        var declared = new ProbeJsonContent(512 * 1024 + 1);
+        var chunked = new ProbeJsonContent(null, streamedLength: 512 * 1024 + 1);
+        var calls = 0;
+        var client = new SabnzbdClient(new HttpClient(new RecordingHandler(_ => new HttpResponseMessage(HttpStatusCode.OK) { Content = calls++ == 0 ? declared : chunked })));
+
+        var statuses = await client.GetKnownJobStatusesAsync(new SabnzbdSettings(true, "http://127.0.0.1:8080", "music", "secret-key"), ["job-id"], CancellationToken.None);
+
+        Assert.Empty(statuses);
+        Assert.False(declared.StreamOpened);
+        Assert.True(chunked.StreamedBytesRead > 512 * 1024);
+    }
+
+    [Fact]
     public async Task Sab_client_does_not_follow_redirects_or_return_secrets()
     {
         const string sentinel = "sab-redirect-sentinel";
@@ -152,5 +193,53 @@ public sealed class SabnzbdClientTests
             Requests.Add(request);
             return Task.FromResult(responder(request));
         }
+    }
+
+    private sealed class ProbeJsonContent : HttpContent
+    {
+        private readonly long? length;
+        private readonly long? streamedLength;
+        public bool StreamOpened { get; private set; }
+        public long StreamedBytesRead { get; private set; }
+        public ProbeJsonContent(long? length, long? streamedLength = null)
+        {
+            this.length = length;
+            this.streamedLength = streamedLength;
+            Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/json");
+        }
+        protected override bool TryComputeLength(out long value) { value = length ?? 0; return length.HasValue; }
+        protected override async Task SerializeToStreamAsync(Stream stream, TransportContext? context)
+        {
+            await using var generated = new GeneratedStream(streamedLength ?? 0, bytesRead => StreamedBytesRead += bytesRead);
+            await generated.CopyToAsync(stream);
+        }
+        protected override Task<Stream> CreateContentReadStreamAsync()
+        {
+            StreamOpened = true;
+            return Task.FromResult<Stream>(new GeneratedStream(streamedLength ?? 0, bytesRead => StreamedBytesRead += bytesRead));
+        }
+    }
+
+    private sealed class GeneratedStream(long length, Action<int> recorded) : Stream
+    {
+        private long remaining = length;
+        private long position;
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+        public override int Read(byte[] buffer, int offset, int count) => Read(buffer.AsSpan(offset, count));
+        public override int Read(Span<byte> buffer)
+        {
+            var read = (int)Math.Min(buffer.Length, remaining);
+            for (var index = 0; index < read; index++) buffer[index] = (position + index) switch { 0 => (byte)'{', 1 => (byte)'\"', 2 => (byte)'v', 3 => (byte)'\"', 4 => (byte)':', 5 => (byte)'\"', _ => (byte)'a' };
+            position += read; remaining -= read; recorded(read); return read;
+        }
+        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default) => ValueTask.FromResult(Read(buffer.Span));
+        public override void Flush() => throw new NotSupportedException();
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
     }
 }

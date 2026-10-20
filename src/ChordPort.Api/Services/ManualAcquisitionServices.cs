@@ -15,6 +15,7 @@ public sealed record ActivityResponse(string Id, string Title, string Indexer, s
 public sealed class CandidateStore
 {
     private const int Maximum = 200;
+    public const int ResponseMaximum = 100;
     private readonly ConcurrentDictionary<string, SearchCandidate> _items = new();
     private readonly TimeProvider _clock;
     public CandidateStore(TimeProvider? clock = null) => _clock = clock ?? TimeProvider.System;
